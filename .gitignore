@@ -1,0 +1,23 @@
+# Build output
+bin/
+obj/
+build/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.ncb
+*.sdf
+*.opensdf
+*.db
+*.opendb
+*.VC.db
+ipch/
+x64/
+Debug/
+Release/
+
+# OS
+Thumbs.db
+.DS_Store
