@@ -1,3 +1,9 @@
+# Local Claude context (never commit)
+CLAUDE.md
+
+# dont include temp
+tmp/
+
 # Build output
 bin/
 obj/

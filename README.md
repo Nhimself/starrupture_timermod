@@ -147,6 +147,15 @@ The compiled DLL is output to `bin/x64/Client Release/plugins/TimerMod.dll`.
 
 ---
 
+## Stream Deck integration
+
+Two plugins consume the JSON export to display the timer on a Stream Deck button:
+
+- **[StarRupture Timer for Elgato Stream Deck](https://marketplace.elgato.com/product/star-rupture-timer-92a0d149-2c03-46c6-a245-1cdd5e39506a)** — Windows, available on the Elgato Marketplace
+- **[StarRupture Timer for StreamController](https://github.com/Nhimself/starrupture_steamdeck_linux_plugin)** — Linux, for the open-source [StreamController](https://github.com/StreamController/StreamController) app
+
+---
+
 ## Credits
 
 - **Nhimself** -- RuptureTimer plugin

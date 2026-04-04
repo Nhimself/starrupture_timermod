@@ -42,6 +42,20 @@ namespace RuptureTimerConfig
 			"false",
 			"Add per-phase timing breakdown to JSON: warning_remaining_sec, burning_remaining_sec, cooling_remaining_sec, stabilizing_remaining_sec, stable_remaining_sec"
 		},
+		{
+			"Export",
+			"WriteDiagnosticLog",
+			ConfigValueType::Boolean,
+			"false",
+			"Append raw game values to a diagnostic log file for debugging phase/timer issues over a full game session"
+		},
+		{
+			"Export",
+			"DiagnosticLogPath",
+			ConfigValueType::String,
+			"Plugins/data/timer_diagnostic.log",
+			"Path to the diagnostic log file (relative to game directory)"
+		},
 		// --- HUD (in-game overlay) ---
 		{
 			"HUD",
@@ -63,6 +77,13 @@ namespace RuptureTimerConfig
 			ConfigValueType::Float,
 			"1.0",
 			"Text scale multiplier (1.0 = default engine font size)"
+		},
+		{
+			"HUD",
+			"ShowDebugInfo",
+			ConfigValueType::Boolean,
+			"false",
+			"Append raw diagnostic lines to the overlay: stage int, wave number, raw timer values. Use to diagnose phase-reading issues."
 		},
 	};
 
@@ -111,6 +132,19 @@ namespace RuptureTimerConfig
 			return s_config ? s_config->ReadBool("RuptureTimer", "Export", "ExtendedPhaseTimers", false) : false;
 		}
 
+		static bool ShouldWriteDiagnosticLog()
+		{
+			return s_config ? s_config->ReadBool("RuptureTimer", "Export", "WriteDiagnosticLog", false) : false;
+		}
+
+		static const char* GetDiagnosticLogPath()
+		{
+			static char buffer[512];
+			if (s_config && s_config->ReadString("RuptureTimer", "Export", "DiagnosticLogPath", buffer, sizeof(buffer), "Plugins/data/timer_diagnostic.log"))
+				return buffer;
+			return "Plugins/data/timer_diagnostic.log";
+		}
+
 		// --- HUD ---
 		static bool ShouldShowOverlay()
 		{
@@ -131,6 +165,11 @@ namespace RuptureTimerConfig
 			if (scale < 0.25f) scale = 0.25f;
 			if (scale > 5.0f)  scale = 5.0f;
 			return scale;
+		}
+
+		static bool ShouldShowDebugInfo()
+		{
+			return s_config ? s_config->ReadBool("RuptureTimer", "HUD", "ShowDebugInfo", false) : false;
 		}
 
 	private:

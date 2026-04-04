@@ -63,6 +63,7 @@ static void OnAnyWorldBeginPlay(SDK::UWorld* world, const char* worldName)
 	LOG_INFO("World ready: %s — starting rupture timer tracking", worldName);
 	s_worldReady = true;
 	DataExport::EnsureOutputDir();
+	DataExport::EnsureDiagnosticLogDir();
 }
 
 static void OnSaveLoaded()
@@ -99,6 +100,7 @@ static void OnEngineTick(float deltaSeconds)
 
 	s_lastState = RuptureTimer::ReadCurrentState();
 	DataExport::Update(deltaSeconds, s_lastState);
+	DataExport::UpdateDiagnosticLog(deltaSeconds, s_lastState);
 	HudOverlay::SetState(s_lastState);
 }
 
@@ -172,6 +174,7 @@ __declspec(dllexport) bool PluginInit(IPluginLogger* logger, IPluginConfig* conf
 			LOG_INFO("Active game world detected on init — starting tracking immediately");
 			s_worldReady = true;
 			DataExport::EnsureOutputDir();
+			DataExport::EnsureDiagnosticLogDir();
 			HudOverlay::SetState(s_lastState);
 		}
 	}

@@ -85,11 +85,12 @@ static constexpr float LINE_H_BASE        = 20.0f; // px per line at scale 1.0
 
 static void CalcPosition(const char* posName, float scale,
                          float screenW, float screenH,
+                         int lineCount,
                          float& outX, float& outY)
 {
 	const float margin    = MARGIN * scale;
 	const float blockW    = ESTIMATED_CHAR_W * LONGEST_LINE_CHARS * scale;
-	const float blockH    = LINE_H_BASE * 3.0f * scale; // 3 text lines
+	const float blockH    = LINE_H_BASE * static_cast<float>(lineCount) * scale;
 
 	// Default: lower-left
 	outX = margin;
@@ -158,8 +159,27 @@ static void OnPostRender(void* hudPtr)
 	const float scale = RuptureTimerConfig::Config::GetOverlayScale();
 	const float lineH = LINE_H_BASE * scale;
 
+	const bool extended  = RuptureTimerConfig::Config::ShouldWriteExtendedPhaseTimers();
+	const bool debugInfo = RuptureTimerConfig::Config::ShouldShowDebugInfo();
+
+	// Count active extended lines (only for non-Stable phases)
+	int extendedLines = 0;
+	if (extended && s_state.phase != RuptureTimer::RupturePhase::Stable)
+	{
+		if (s_state.warningRemaining     >= 0.0f) extendedLines++;
+		if (s_state.burningRemaining     >= 0.0f) extendedLines++;
+		if (s_state.coolingRemaining     >= 0.0f) extendedLines++;
+		if (s_state.stabilizingRemaining >= 0.0f) extendedLines++;
+		if (s_state.stableRemaining      >= 0.0f) extendedLines++;
+	}
+
+	const int debugLines = debugInfo ? 2 : 0;
+	const int totalLines = 3 + extendedLines + debugLines;
+
 	float x, y;
-	CalcPosition(RuptureTimerConfig::Config::GetOverlayPosition(), scale, screenW, screenH, x, y);
+	CalcPosition(RuptureTimerConfig::Config::GetOverlayPosition(), scale, screenW, screenH, totalLines, x, y);
+
+	float curY = y;
 
 	// --- Line 1: Next Rupture countdown ---
 	char nextBuf[16];
@@ -167,7 +187,8 @@ static void OnPostRender(void* hudPtr)
 
 	char line1[48];
 	_snprintf_s(line1, sizeof(line1), _TRUNCATE, "Next Rupture: %s", nextBuf);
-	DrawLine(self, x, y, scale, line1);
+	DrawLine(self, x, curY, scale, line1);
+	curY += lineH;
 
 	// --- Line 2: Planet status (phase + wave type if active) ---
 	char line2[48];
@@ -176,7 +197,8 @@ static void OnPostRender(void* hudPtr)
 		_snprintf_s(line2, sizeof(line2), _TRUNCATE, "Planet: %s (%s)", s_state.phaseName, s_state.waveTypeName);
 	else
 		_snprintf_s(line2, sizeof(line2), _TRUNCATE, "Planet: %s", s_state.phaseName);
-	DrawLine(self, x, y + lineH, scale, line2);
+	DrawLine(self, x, curY, scale, line2);
+	curY += lineH;
 
 	// --- Line 3: Current phase timer ---
 	char phaseBuf[16];
@@ -184,7 +206,70 @@ static void OnPostRender(void* hudPtr)
 
 	char line3[48];
 	_snprintf_s(line3, sizeof(line3), _TRUNCATE, "Wave Timer: %s", phaseBuf);
-	DrawLine(self, x, y + lineH * 2.0f, scale, line3);
+	DrawLine(self, x, curY, scale, line3);
+	curY += lineH;
+
+	// --- Extended phase breakdown (ExtendedPhaseTimers=true, non-Stable phases only) ---
+	if (extended && s_state.phase != RuptureTimer::RupturePhase::Stable)
+	{
+		char buf[48];
+		char tbuf[16];
+
+		if (s_state.warningRemaining >= 0.0f)
+		{
+			FormatTime(tbuf, sizeof(tbuf), s_state.warningRemaining);
+			_snprintf_s(buf, sizeof(buf), _TRUNCATE, "  Warning:     %s", tbuf);
+			DrawLine(self, x, curY, scale, buf);
+			curY += lineH;
+		}
+		if (s_state.burningRemaining >= 0.0f)
+		{
+			FormatTime(tbuf, sizeof(tbuf), s_state.burningRemaining);
+			_snprintf_s(buf, sizeof(buf), _TRUNCATE, "  Burning:     %s", tbuf);
+			DrawLine(self, x, curY, scale, buf);
+			curY += lineH;
+		}
+		if (s_state.coolingRemaining >= 0.0f)
+		{
+			FormatTime(tbuf, sizeof(tbuf), s_state.coolingRemaining);
+			_snprintf_s(buf, sizeof(buf), _TRUNCATE, "  Cooling:     %s", tbuf);
+			DrawLine(self, x, curY, scale, buf);
+			curY += lineH;
+		}
+		if (s_state.stabilizingRemaining >= 0.0f)
+		{
+			FormatTime(tbuf, sizeof(tbuf), s_state.stabilizingRemaining);
+			_snprintf_s(buf, sizeof(buf), _TRUNCATE, "  Stabilizing: %s", tbuf);
+			DrawLine(self, x, curY, scale, buf);
+			curY += lineH;
+		}
+		if (s_state.stableRemaining >= 0.0f)
+		{
+			FormatTime(tbuf, sizeof(tbuf), s_state.stableRemaining);
+			_snprintf_s(buf, sizeof(buf), _TRUNCATE, "  Stable:      %s", tbuf);
+			DrawLine(self, x, curY, scale, buf);
+			curY += lineH;
+		}
+	}
+
+	// --- Debug info lines (ShowDebugInfo=true) ---
+	if (debugInfo)
+	{
+		char dbg1[80];
+		_snprintf_s(dbg1, sizeof(dbg1), _TRUNCATE, "[Wave:%d RawStage:%d Path:%s]",
+			s_state.waveNumber,
+			s_state.diag.rawStage,
+			s_state.diag.codePath ? s_state.diag.codePath : "?");
+		DrawLine(self, x, curY, scale, dbg1);
+		curY += lineH;
+
+		char dbg2[64];
+		_snprintf_s(dbg2, sizeof(dbg2), _TRUNCATE, "[PhRem:%.1f Rup:%.1f %s]",
+			s_state.phaseRemainingSeconds,
+			s_state.nextRuptureInSeconds,
+			s_state.paused ? "PAUSED" : "");
+		DrawLine(self, x, curY, scale, dbg2);
+	}
 }
 
 // ---------------------------------------------------------------------------

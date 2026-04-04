@@ -16,6 +16,27 @@ namespace RuptureTimer
 		Stabilizing  = 5,   // Safe gathering window (EEnviroWaveStage::Growback)
 	};
 
+	// Raw diagnostic data captured during ReadCurrentState().
+	// Used by the diagnostic log to record exactly what the game reported.
+	struct DiagnosticRawData
+	{
+		const char*  codePath;              // "subsystem", "repActor", "stateMachine", "none"
+		int          rawStage;              // EEnviroWaveStage as int (-1 if not available)
+		int          rawWaveType;           // EEnviroWave as int (-1 if not available)
+		float        rawNextTime;           // ACrWaveTimerActor::NextTime (absolute server timestamp)
+		double       rawServerTime;         // GetServerWorldTimeSeconds()
+		float        rawNextTimeRemaining;  // NextTime - serverTime, clamped >= 0
+		int32_t      rawNextPhase;          // ACrWaveTimerActor::NextPhase
+		bool         rawPaused;             // ACrWaveTimerActor::bPause
+		bool         hasRepActor;           // was ACrGatherableSpawnersRepActor found?
+		bool         hasSubsystem;          // was UCrEnviroWaveSubsystem found?
+		float        rawProgress;           // GetCurrentStageProgress() (-1 if not available)
+		// Hex dump of repActor memory at offsets 0x02A8..0x02B0 (8 bytes)
+		// Allows detecting offset misalignment without recompiling.
+		uint8_t      repActorBytes[8];      // raw bytes at repActor+0x02A8, zeroed if no repActor
+		bool         repActorBytesValid;    // true if repActorBytes was populated
+	};
+
 	struct TimerState
 	{
 		bool         valid;                  // false if world/game state not ready
@@ -38,6 +59,8 @@ namespace RuptureTimer
 		float        coolingRemaining;      // time left in Cooling phase
 		float        stabilizingRemaining;  // time left in Stabilizing phase
 		float        stableRemaining;       // duration of the next Stable period
+
+		DiagnosticRawData diag;             // raw values for diagnostic logging
 	};
 
 	// Read current rupture timer state from the game. Call only from game thread.

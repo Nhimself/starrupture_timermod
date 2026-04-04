@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include "Basic.hpp"
 #include "Engine_classes.hpp"
 #include "Chimera_classes.hpp"
@@ -79,101 +80,130 @@ static constexpr float BURNING_DURATION     = 30.0f;
 static constexpr float COOLING_DURATION     = 60.0f;
 static constexpr float STABILIZING_DURATION = 600.0f;
 
-// Thresholds for jump detection
-static constexpr float NEAR_ZERO_THRESHOLD  = 10.0f;   // "near zero" = prev was <= this
-static constexpr float BURN_JUMP_MAX        = 60.0f;   // small jump: new value <= this  → Burning
-static constexpr float COOLING_JUMP_MIN     = 120.0f;  // large jump: new value >= this → Cooling
-
 struct ClientPhaseTracker
 {
-	RupturePhase phase           = RupturePhase::Unknown;
-	float phaseStartServerTime   = -1.0f;  // server time when current phase began
-	float prevNextTimeRemaining  = -1.0f;
-	int32_t prevNextPhase        = -1;
-	SDK::UWorld* lastWorld       = nullptr; // reset tracker on world change
-	bool initialized             = false;
+	RupturePhase phase                      = RupturePhase::Unknown;
+	int32_t      prevNextPhase              = -1;
+	SDK::UWorld* lastWorld                  = nullptr;
+	bool         initialized                = false;
+	float        lastObservedStableDuration = 2550.0f; // default canonical Stable duration
+	float        phase3StartRemaining       = -1.0f;   // nextTimeRemaining when nextPhase first hit 3
 };
 static ClientPhaseTracker s_tracker;
 
 // Update the state machine; call once per tick in the fallback path.
-// serverTime    — result of gameState->GetServerWorldTimeSeconds()
-// nextTimeRemaining — NextTime - serverTime, clamped to >= 0
-// nextPhase     — timerActor->NextPhase
-// world         — current UWorld (used for world-change detection)
-static void UpdateClientPhaseStateMachine(float serverTime, float nextTimeRemaining,
+// nextPhase directly encodes the current interval (0=Stable, 1=Warning,
+// 2=Burning, 3=post-wave). nextTimeRemaining = time left in that interval.
+static void UpdateClientPhaseStateMachine(float /*serverTime*/, float nextTimeRemaining,
                                           int32_t nextPhase, SDK::UWorld* world)
 {
-	// Reset on world change
+	// Reset on world change, but carry over the last observed stable duration.
 	if (world != s_tracker.lastWorld)
 	{
+		float savedStable = s_tracker.lastObservedStableDuration;
 		s_tracker = ClientPhaseTracker{};
 		s_tracker.lastWorld = world;
+		s_tracker.lastObservedStableDuration = savedStable;
 	}
 
-	if (!s_tracker.initialized)
+	if (!s_tracker.initialized || nextPhase != s_tracker.prevNextPhase)
 	{
-		s_tracker.initialized           = true;
-		s_tracker.prevNextTimeRemaining = nextTimeRemaining;
-		s_tracker.prevNextPhase         = nextPhase;
+		LOG_DEBUG("ClientPhase: nextPhase %d→%d remaining=%.1f",
+			s_tracker.prevNextPhase, nextPhase, nextTimeRemaining);
 
-		// Initial-connection heuristic: if nextTimeRemaining is in the
-		// Burning range, we are probably mid-Burning; otherwise assume Stable.
-		// Phase label may be wrong for one cycle, but next_rupture_in_sec is
-		// always accurate because NextTime already encodes the correct time.
-		if (nextTimeRemaining >= 0.0f && nextTimeRemaining <= BURN_JUMP_MAX)
+		// Calibrate anchors on phase entry.
+		// Only accept plausible stable durations (> 5 min) to guard against
+		// clamped-zero values when NextTime hasn't been replicated yet.
+		if (nextPhase == 0 && nextTimeRemaining > 300.0f)
+			s_tracker.lastObservedStableDuration = nextTimeRemaining;
+		if (nextPhase == 3)
+			s_tracker.phase3StartRemaining = nextTimeRemaining;
+
+		s_tracker.prevNextPhase = nextPhase;
+		s_tracker.initialized   = true;
+	}
+
+	switch (nextPhase)
+	{
+		case 0:  s_tracker.phase = RupturePhase::Stable;  break;
+		case 1:  s_tracker.phase = RupturePhase::Warning; break;
+		case 2:  s_tracker.phase = RupturePhase::Burning; break;
+		case 3:
 		{
-			s_tracker.phase              = RupturePhase::Burning;
-			// Back-estimate phase start from remaining burn time
-			s_tracker.phaseStartServerTime = serverTime - (BURNING_DURATION - nextTimeRemaining);
+			// Phase 3 = Cooling (first COOLING_DURATION seconds) + Stabilizing (remainder).
+			// coolingBoundary = nextTimeRemaining value at the Cooling→Stabilizing transition.
+			float coolingBoundary = (s_tracker.phase3StartRemaining > 0.0f)
+				? (s_tracker.phase3StartRemaining - COOLING_DURATION)
+				: STABILIZING_DURATION;
+			s_tracker.phase = (nextTimeRemaining > coolingBoundary)
+				? RupturePhase::Cooling : RupturePhase::Stabilizing;
+			break;
 		}
-		else
+		default: s_tracker.phase = RupturePhase::Stable; break;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Populate state fields from the client-side state machine result.
+// nextTimeRemaining = time remaining in the current nextPhase interval.
+// ---------------------------------------------------------------------------
+static void FillStateFromStateMachine(TimerState& state, float nextTimeRemaining)
+{
+	switch (s_tracker.phase)
+	{
+		case RupturePhase::Stable:
+			state.phase                 = RupturePhase::Stable;
+			state.phaseName             = "Stable";
+			state.phaseRemainingSeconds = nextTimeRemaining;
+			state.nextRuptureInSeconds  = nextTimeRemaining;
+			state.stableRemaining       = nextTimeRemaining;
+			break;
+
+		case RupturePhase::Warning:
+			state.phase                 = RupturePhase::Warning;
+			state.phaseName             = "Warning";
+			state.phaseRemainingSeconds = nextTimeRemaining;
+			state.nextRuptureInSeconds  = nextTimeRemaining;
+			break;
+
+		case RupturePhase::Burning:
+			state.phase                 = RupturePhase::Burning;
+			state.phaseName             = "Burning";
+			state.phaseRemainingSeconds = nextTimeRemaining;
+			state.nextRuptureInSeconds  = 0.0f;
+			state.burningRemaining      = nextTimeRemaining;
+			break;
+
+		case RupturePhase::Cooling:
 		{
-			s_tracker.phase              = RupturePhase::Stable;
-			s_tracker.phaseStartServerTime = serverTime;
+			float coolingBoundary  = (s_tracker.phase3StartRemaining > 0.0f)
+				? (s_tracker.phase3StartRemaining - COOLING_DURATION) : STABILIZING_DURATION;
+			float coolingRemaining = nextTimeRemaining - coolingBoundary;
+			if (coolingRemaining < 0.0f) coolingRemaining = 0.0f;
+			state.phase                 = RupturePhase::Cooling;
+			state.phaseName             = "Cooling";
+			state.phaseRemainingSeconds = coolingRemaining;
+			state.nextRuptureInSeconds  = nextTimeRemaining + s_tracker.lastObservedStableDuration;
+			state.coolingRemaining      = coolingRemaining;
+			state.stabilizingRemaining  = coolingBoundary;
+			state.stableRemaining       = s_tracker.lastObservedStableDuration;
+			break;
 		}
-		return;
-	}
 
-	float prev = s_tracker.prevNextTimeRemaining;
+		case RupturePhase::Stabilizing:
+			state.phase                 = RupturePhase::Stabilizing;
+			state.phaseName             = "Stabilizing";
+			state.phaseRemainingSeconds = nextTimeRemaining;
+			state.nextRuptureInSeconds  = nextTimeRemaining + s_tracker.lastObservedStableDuration;
+			state.stabilizingRemaining  = nextTimeRemaining;
+			state.stableRemaining       = s_tracker.lastObservedStableDuration;
+			break;
 
-	// Transition detection — evaluated in priority order.
-
-	// 1. NextPhase incremented → new wave number means we just entered Stable.
-	if (nextPhase > s_tracker.prevNextPhase && s_tracker.prevNextPhase >= 0)
-	{
-		s_tracker.phase              = RupturePhase::Stable;
-		s_tracker.phaseStartServerTime = serverTime;
-		LOG_DEBUG("ClientPhase→Stable (NextPhase %d→%d)", s_tracker.prevNextPhase, nextPhase);
+		default:
+			state.phase     = RupturePhase::Unknown;
+			state.phaseName = "Unknown";
+			break;
 	}
-	// 2. nextTimeRemaining jumped from near-zero to small-positive → Burning started.
-	else if (prev >= 0.0f && prev <= NEAR_ZERO_THRESHOLD
-	         && nextTimeRemaining > prev + 5.0f
-	         && nextTimeRemaining <= BURN_JUMP_MAX)
-	{
-		s_tracker.phase              = RupturePhase::Burning;
-		s_tracker.phaseStartServerTime = serverTime;
-		LOG_DEBUG("ClientPhase→Burning (jump %.1f→%.1f)", prev, nextTimeRemaining);
-	}
-	// 3. nextTimeRemaining jumped from near-zero to large → Cooling started.
-	else if (prev >= 0.0f && prev <= NEAR_ZERO_THRESHOLD
-	         && nextTimeRemaining >= COOLING_JUMP_MIN)
-	{
-		s_tracker.phase              = RupturePhase::Cooling;
-		s_tracker.phaseStartServerTime = serverTime;
-		LOG_DEBUG("ClientPhase→Cooling (jump %.1f→%.1f)", prev, nextTimeRemaining);
-	}
-	// 4. Cooling has elapsed its fixed duration → transition to Stabilizing.
-	else if (s_tracker.phase == RupturePhase::Cooling
-	         && (serverTime - s_tracker.phaseStartServerTime) >= COOLING_DURATION)
-	{
-		// Set phase start to the exact moment cooling ended (not current tick)
-		s_tracker.phaseStartServerTime += COOLING_DURATION;
-		s_tracker.phase = RupturePhase::Stabilizing;
-		LOG_DEBUG("ClientPhase→Stabilizing (cooling elapsed)");
-	}
-
-	s_tracker.prevNextTimeRemaining = nextTimeRemaining;
-	s_tracker.prevNextPhase         = nextPhase;
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +261,21 @@ TimerState ReadCurrentState()
 	state.stabilizingRemaining = -1.0f;
 	state.stableRemaining      = -1.0f;
 
+	// Initialize diagnostic raw data
+	state.diag.codePath            = "none";
+	state.diag.rawStage            = -1;
+	state.diag.rawWaveType         = -1;
+	state.diag.rawNextTime         = 0.0f;
+	state.diag.rawServerTime       = 0.0;
+	state.diag.rawNextTimeRemaining = 0.0f;
+	state.diag.rawNextPhase        = -1;
+	state.diag.rawPaused           = false;
+	state.diag.hasRepActor         = false;
+	state.diag.hasSubsystem        = false;
+	state.diag.rawProgress         = -1.0f;
+	memset(state.diag.repActorBytes, 0, sizeof(state.diag.repActorBytes));
+	state.diag.repActorBytesValid  = false;
+
 	SDK::UWorld* world = SDK::UWorld::GetWorld();
 	if (!world) { LOG_WARN_ONCE("ReadCurrentState: UWorld is null"); return state; }
 
@@ -245,16 +290,38 @@ TimerState ReadCurrentState()
 	state.waveNumber = timerActor->NextPhase;
 	state.paused     = timerActor->bPause;
 
-	// NextTime is an absolute server world timestamp (seconds since level start),
-	// not a countdown. Subtract current server time to get remaining seconds.
+	// NextTime is an absolute server timestamp. GetServerWorldTimeSeconds()
+	// is the correct reference — it's the client-side estimate of the server's
+	// world clock, which is what the server uses when setting NextTime.
 	double serverTime = gameState->GetServerWorldTimeSeconds();
-	float nextTimeRemaining = timerActor->NextTime - (float)serverTime;
-	if (nextTimeRemaining < 0.0f) nextTimeRemaining = 0.0f;
+	float rawUnclamped = timerActor->NextTime - (float)serverTime;
+	float nextTimeRemaining = (rawUnclamped < 0.0f) ? 0.0f : rawUnclamped;
+
+	// Populate common diagnostic fields
+	state.diag.rawNextTime          = timerActor->NextTime;
+	state.diag.rawServerTime        = serverTime;
+	state.diag.rawNextTimeRemaining = nextTimeRemaining;
+	state.diag.rawNextPhase         = timerActor->NextPhase;
+	state.diag.rawPaused            = timerActor->bPause;
+
+	// If NextTime is significantly in the past the WaveTimerActor hasn't
+	// received its replication update yet. Return Unknown until it does.
+	if (rawUnclamped < -60.0f)
+	{
+		LOG_WARN_ONCE("ReadCurrentState: NextTime is %.0fs in the past — rupture cycle not active", rawUnclamped);
+		state.phase     = RupturePhase::Unknown;
+		state.phaseName = "Waiting";
+		return state;
+	}
 
 	// Try to find the wave subsystem. It is server-authoritative and will be absent
 	// on clients connected to a dedicated server (ShouldCreateSubsystem returns false
 	// for client worlds). Fall back to timer-actor-only mode when unavailable.
 	SDK::UCrEnviroWaveSubsystem* waveSub = FindEnviroWaveSubsystem(world);
+	state.diag.hasSubsystem = (waveSub != nullptr);
+	LOG_INFO("ReadCurrentState: waveSub=%s nextTimeRemaining=%.1f waveNumber=%d",
+		waveSub ? "FOUND" : "absent", nextTimeRemaining, timerActor->NextPhase);
+
 	if (!waveSub)
 	{
 		LOG_DEBUG("ReadCurrentState: UCrEnviroWaveSubsystem absent — using replication-actor mode");
@@ -266,8 +333,28 @@ TimerState ReadCurrentState()
 		SDK::ACrGatherableSpawnersRepActor* repActor = FindGatherableSpawnersRepActor(world);
 		if (repActor)
 		{
+			state.diag.codePath    = "repActor";
+			state.diag.hasRepActor = true;
+
+			// Capture raw bytes at repActor+0x02A8 (8 bytes). Expected layout per SDK:
+			//   [0..3] RepGlobalGatherablePCGSeed (int32 LE)
+			//   [4]    RepEnviroWaveTypeChange     (uint8: 0=None,1=Heat,2=Cold)
+			//   [5]    RepEnviroWaveStageChange    (uint8: 0=None,1=PreWave,2=Moving,3=Fadeout,4=Growback)
+			//   [6..7] padding
+			// If byte[5] != rawStage, the SDK offsets are stale → file bug at
+			// https://github.com/AlienXAXS/StarRupture-Game-SDK
+			const uint8_t* base = reinterpret_cast<const uint8_t*>(repActor);
+			memcpy(state.diag.repActorBytes, base + 0x02A8, 8);
+			state.diag.repActorBytesValid = true;
+
 			SDK::EEnviroWaveStage repStage = repActor->RepEnviroWaveStageChange;
 			SDK::EEnviroWave      repWave  = repActor->RepEnviroWaveTypeChange;
+
+			state.diag.rawStage    = static_cast<int>(repStage);
+			state.diag.rawWaveType = static_cast<int>(repWave);
+
+			LOG_INFO("ReadCurrentState: repActor FOUND — repStage=%d repWave=%d",
+				static_cast<int>(repStage), static_cast<int>(repWave));
 
 			state.waveType = static_cast<uint8_t>(repWave);
 			switch (repWave)
@@ -332,89 +419,22 @@ TimerState ReadCurrentState()
 		else
 		{
 			// Last-resort fallback: no subsystem and no rep actor found.
-			// Use the client-side state machine to infer phase from observable
-			// jumps in nextTimeRemaining and changes in NextPhase.
-			LOG_DEBUG("ReadCurrentState: using client-side phase state machine");
+			// NextPhase directly encodes the current interval (0=Stable, 1=Warning,
+			// 2=Burning, 3=post-wave). nextTimeRemaining = time left in that interval.
+			state.diag.codePath = "stateMachine";
+			LOG_INFO("ReadCurrentState: repActor absent — using client-side phase state machine");
 
 			UpdateClientPhaseStateMachine(
 				(float)serverTime, nextTimeRemaining,
 				timerActor->NextPhase, world);
 
-			float elapsed = serverTime - s_tracker.phaseStartServerTime;
-
-			switch (s_tracker.phase)
-			{
-				case RupturePhase::Stable:
-					state.phase                 = RupturePhase::Stable;
-					state.phaseName             = "Stable";
-					state.phaseRemainingSeconds = nextTimeRemaining;
-					state.nextRuptureInSeconds  = nextTimeRemaining;
-					state.stableRemaining       = nextTimeRemaining;
-					break;
-
-				case RupturePhase::Warning:
-					state.phase                 = RupturePhase::Warning;
-					state.phaseName             = "Warning";
-					state.phaseRemainingSeconds = nextTimeRemaining;
-					state.nextRuptureInSeconds  = nextTimeRemaining;
-					break;
-
-				case RupturePhase::Burning:
-				{
-					// During Burning, NextTime = end of Burning, so nextTimeRemaining = burning remaining.
-					float burningRemaining = nextTimeRemaining;
-					if (burningRemaining < 0.0f) burningRemaining = 0.0f;
-					state.phase                 = RupturePhase::Burning;
-					state.phaseName             = "Burning";
-					state.phaseRemainingSeconds = burningRemaining;
-					state.nextRuptureInSeconds  = 0.0f;
-					state.burningRemaining      = burningRemaining;
-					break;
-				}
-
-				case RupturePhase::Cooling:
-				{
-					// nextTimeRemaining = full remaining time until next rupture (from NextTime).
-					// phase_remaining = time left in Cooling = COOLING_DURATION - elapsed.
-					float coolingRemaining = COOLING_DURATION - elapsed;
-					if (coolingRemaining < 0.0f) coolingRemaining = 0.0f;
-					// stableRemaining can be estimated: total - cooling_remaining - stabilizing
-					float stableEst = nextTimeRemaining - coolingRemaining - STABILIZING_DURATION;
-					state.phase                 = RupturePhase::Cooling;
-					state.phaseName             = "Cooling";
-					state.phaseRemainingSeconds = coolingRemaining;
-					state.nextRuptureInSeconds  = nextTimeRemaining;
-					state.coolingRemaining      = coolingRemaining;
-					state.stabilizingRemaining  = STABILIZING_DURATION;
-					state.stableRemaining       = (stableEst >= 0.0f) ? stableEst : -1.0f;
-					break;
-				}
-
-				case RupturePhase::Stabilizing:
-				{
-					// phaseStartServerTime was set to cooling_start + COOLING_DURATION.
-					float stabilizingRemaining = STABILIZING_DURATION - elapsed;
-					if (stabilizingRemaining < 0.0f) stabilizingRemaining = 0.0f;
-					float stableEst = nextTimeRemaining - stabilizingRemaining;
-					state.phase                 = RupturePhase::Stabilizing;
-					state.phaseName             = "Stabilizing";
-					state.phaseRemainingSeconds = stabilizingRemaining;
-					state.nextRuptureInSeconds  = nextTimeRemaining;
-					state.stabilizingRemaining  = stabilizingRemaining;
-					state.stableRemaining       = (stableEst >= 0.0f) ? stableEst : -1.0f;
-					break;
-				}
-
-				default: // Unknown — not enough data yet
-					state.phase     = RupturePhase::Unknown;
-					state.phaseName = "Unknown";
-					break;
-			}
+			FillStateFromStateMachine(state, nextTimeRemaining);
 		}
 		return state;
 	}
 
 	// --- Full mode: subsystem is available (local / listen server) ---
+	state.diag.codePath = "subsystem";
 
 	// Wave type (Heat / Cold)
 	SDK::EEnviroWave waveType = waveSub->GetCurrentType();
@@ -427,6 +447,10 @@ TimerState ReadCurrentState()
 	}
 
 	SDK::EEnviroWaveStage stage = waveSub->GetCurrentStage();
+	state.diag.rawStage    = static_cast<int>(stage);
+	state.diag.rawWaveType = static_cast<int>(waveType);
+	LOG_INFO("ReadCurrentState: subsystem stage=%d waveType=%d nextTimeRemaining=%.1f",
+		static_cast<int>(stage), static_cast<int>(waveType), nextTimeRemaining);
 
 	if (stage == SDK::EEnviroWaveStage::None)
 	{
@@ -444,6 +468,7 @@ TimerState ReadCurrentState()
 	SDK::FCrEnviroWaveSettings settings = waveSub->GetCurrentStageSettings();
 
 	float progress = waveSub->GetCurrentStageProgress();
+	state.diag.rawProgress = progress;
 	if (progress < 0.0f) progress = 0.0f;
 	if (progress > 1.0f) progress = 1.0f;
 
