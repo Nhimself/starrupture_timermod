@@ -9,7 +9,7 @@ name: Auto-update SDK and release
 #                     token that has repo access here)
 on:
   schedule:
-    - cron: '0 6 * * *'    # 06:00 UTC every day
+    - cron: '0 6 * * 1'    # 06:00 UTC every Monday
   workflow_dispatch:
   repository_dispatch:
     types: [sdk-released]
