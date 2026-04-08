@@ -8,17 +8,11 @@
 #include "Engine_classes.hpp"
 
 // ---------------------------------------------------------------------------
-// Global plugin interface pointers
+// Global plugin self pointer (v19: single struct instead of 4 separate ptrs)
 // ---------------------------------------------------------------------------
-static IPluginLogger*  g_logger  = nullptr;
-static IPluginConfig*  g_config  = nullptr;
-static IPluginScanner* g_scanner = nullptr;
-static IPluginHooks*   g_hooks   = nullptr;
+static IPluginSelf* g_self = nullptr;
 
-IPluginLogger*  GetLogger()  { return g_logger; }
-IPluginConfig*  GetConfig()  { return g_config; }
-IPluginScanner* GetScanner() { return g_scanner; }
-IPluginHooks*   GetHooks()   { return g_hooks; }
+IPluginSelf* GetSelf() { return g_self; }
 
 // ---------------------------------------------------------------------------
 // Plugin metadata
@@ -114,16 +108,13 @@ __declspec(dllexport) PluginInfo* GetPluginInfo()
 	return &s_pluginInfo;
 }
 
-__declspec(dllexport) bool PluginInit(IPluginLogger* logger, IPluginConfig* config, IPluginScanner* scanner, IPluginHooks* hooks)
+__declspec(dllexport) bool PluginInit(IPluginSelf* self)
 {
-	g_logger  = logger;
-	g_config  = config;
-	g_scanner = scanner;
-	g_hooks   = hooks;
+	g_self = self;
 
 	LOG_INFO("RuptureTimer initializing...");
 
-	RuptureTimerConfig::Config::Initialize(config);
+	RuptureTimerConfig::Config::Initialize(self);
 
 	if (!RuptureTimerConfig::Config::IsEnabled())
 	{
@@ -131,11 +122,13 @@ __declspec(dllexport) bool PluginInit(IPluginLogger* logger, IPluginConfig* conf
 		return true;
 	}
 
-	if (!hooks)
+	if (!self || !self->hooks)
 	{
 		LOG_ERROR("hooks interface is null — cannot register callbacks");
 		return false;
 	}
+
+	auto* hooks = self->hooks;
 
 	if (hooks->World)
 	{
@@ -192,10 +185,12 @@ __declspec(dllexport) void PluginShutdown()
 
 	s_worldReady = false;
 
-	HudOverlay::Remove(g_hooks);
-
-	if (auto* hooks = GetHooks())
+	if (g_self && g_self->hooks)
 	{
+		auto* hooks = g_self->hooks;
+
+		HudOverlay::Remove(hooks);
+
 		if (hooks->World)
 		{
 			hooks->World->UnregisterOnAnyWorldBeginPlay(OnAnyWorldBeginPlay);
@@ -205,10 +200,7 @@ __declspec(dllexport) void PluginShutdown()
 			hooks->Engine->UnregisterOnTick(OnEngineTick);
 	}
 
-	g_logger  = nullptr;
-	g_config  = nullptr;
-	g_scanner = nullptr;
-	g_hooks   = nullptr;
+	g_self = nullptr;
 }
 
 } // extern "C"
