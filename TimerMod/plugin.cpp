@@ -43,6 +43,108 @@ static constexpr float NET_SYNC_INTERVAL_STABLE = 10.0f;
 static constexpr float NET_SYNC_INTERVAL_ACTIVE =  2.0f;
 static float s_netSyncAccum = 0.0f;
 
+// Track which tick function was registered so PluginShutdown unregisters the right one.
+static void (*s_registeredTick)(float) = nullptr;
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+static void TickHeartbeat(float deltaSeconds)
+{
+	static float s_logAccum = 0.0f;
+	s_logAccum += deltaSeconds;
+	if (s_logAccum >= 5.0f)
+	{
+		s_logAccum = 0.0f;
+		LOG_DEBUG("Tick alive — deltaSeconds=%.4f", deltaSeconds);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Server tick — reads game state from local subsystem, broadcasts to clients.
+// Registered only when IsServer() == true at init time.
+// ---------------------------------------------------------------------------
+static void OnServerTick(float deltaSeconds)
+{
+	if (!s_worldReady) return;
+
+	TickHeartbeat(deltaSeconds);
+
+	s_lastState = RuptureTimer::ReadCurrentState();
+
+	auto* hooks = g_self ? g_self->hooks : nullptr;
+	if (hooks && hooks->Network && s_lastState.valid)
+	{
+		bool activePhase = (s_lastState.phase != RuptureTimer::RupturePhase::Stable &&
+		                    s_lastState.phase != RuptureTimer::RupturePhase::Unknown);
+		float interval = activePhase ? NET_SYNC_INTERVAL_ACTIVE : NET_SYNC_INTERVAL_STABLE;
+
+		s_netSyncAccum += deltaSeconds;
+		if (s_netSyncAccum >= interval)
+		{
+			s_netSyncAccum = 0.0f;
+
+			RuptureTimer::TimerSyncPacket pkt{};
+			pkt.phaseRemainingSeconds = s_lastState.phaseRemainingSeconds;
+			pkt.nextRuptureInSeconds  = s_lastState.nextRuptureInSeconds;
+			pkt.stableRemaining       = s_lastState.stableRemaining;
+			pkt.waveNumber            = s_lastState.waveNumber;
+			pkt.serverId              = RuptureTimer::GetServerId();
+			pkt.phase                 = static_cast<uint8_t>(s_lastState.phase);
+			pkt.waveType              = s_lastState.waveType;
+			pkt.paused                = s_lastState.paused ? 1 : 0;
+			// rawStage carries the server's EEnviroWaveStage so the client gets the
+			// authoritative stage enum (Fadeout vs Growback) instead of guessing.
+			pkt.rawStage              = (s_lastState.diag.rawStage >= 0)
+			                              ? static_cast<uint8_t>(s_lastState.diag.rawStage)
+			                              : 0;
+
+			Network::SendPacketToAllClients(hooks, g_self, pkt);
+			LOG_DEBUG("NetSync sent: phase=%d rem=%.1f nextRup=%.1f serverId=0x%08X",
+				(int)pkt.phase, pkt.phaseRemainingSeconds, pkt.nextRuptureInSeconds, pkt.serverId);
+		}
+	}
+
+	DataExport::Update(deltaSeconds, s_lastState);
+	DataExport::UpdateDiagnosticLog(deltaSeconds, s_lastState);
+	HudOverlay::SetState(s_lastState);  // no-op on dedicated server (hooks->HUD is null)
+}
+
+// ---------------------------------------------------------------------------
+// Client tick — reads state via netSync (or local fallback if never paired),
+// updates HUD. Registered only when IsServer() == false at init time.
+// ---------------------------------------------------------------------------
+static void OnClientTick(float deltaSeconds)
+{
+	if (!s_worldReady) return;
+
+	TickHeartbeat(deltaSeconds);
+
+	s_lastState = RuptureTimer::ReadCurrentState();
+
+	DataExport::Update(deltaSeconds, s_lastState);
+	DataExport::UpdateDiagnosticLog(deltaSeconds, s_lastState);
+	HudOverlay::SetState(s_lastState);
+}
+
+// ---------------------------------------------------------------------------
+// Local tick — no network channel available (solo play, offline, etc.).
+// Reads game state from local subsystem / repActor only.
+// ---------------------------------------------------------------------------
+static void OnLocalTick(float deltaSeconds)
+{
+	if (!s_worldReady) return;
+
+	TickHeartbeat(deltaSeconds);
+
+	s_lastState = RuptureTimer::ReadCurrentState();
+
+	DataExport::Update(deltaSeconds, s_lastState);
+	DataExport::UpdateDiagnosticLog(deltaSeconds, s_lastState);
+	HudOverlay::SetState(s_lastState);
+}
+
 // ---------------------------------------------------------------------------
 // Callbacks
 // ---------------------------------------------------------------------------
@@ -87,62 +189,6 @@ static void OnSaveLoaded()
 	}
 }
 
-static void OnEngineTick(float deltaSeconds)
-{
-	if (!s_worldReady) return;
-
-	// Heartbeat log every 5s so we can confirm tick is firing and delta is valid
-	static float s_logAccum = 0.0f;
-	s_logAccum += deltaSeconds;
-	if (s_logAccum >= 5.0f)
-	{
-		s_logAccum = 0.0f;
-		LOG_DEBUG("Tick alive — deltaSeconds=%.4f", deltaSeconds);
-	}
-
-	s_lastState = RuptureTimer::ReadCurrentState();
-
-	// Server: broadcast authoritative timer state to all clients.
-	// Clients that lack UCrEnviroWaveSubsystem (dedicated server scenario) use
-	// this packet instead of GetServerWorldTimeSeconds()-based estimation, which
-	// is susceptible to clock-sync corrections causing visible HUD jumps.
-	auto* hooks = g_self ? g_self->hooks : nullptr;
-	if (hooks && hooks->Network && hooks->Network->IsServer() && s_lastState.valid)
-	{
-		bool activePhase = (s_lastState.phase != RuptureTimer::RupturePhase::Stable &&
-		                    s_lastState.phase != RuptureTimer::RupturePhase::Unknown);
-		float interval = activePhase ? NET_SYNC_INTERVAL_ACTIVE : NET_SYNC_INTERVAL_STABLE;
-
-		s_netSyncAccum += deltaSeconds;
-		if (s_netSyncAccum >= interval)
-		{
-			s_netSyncAccum = 0.0f;
-
-			RuptureTimer::TimerSyncPacket pkt{};
-			pkt.phaseRemainingSeconds = s_lastState.phaseRemainingSeconds;
-			pkt.nextRuptureInSeconds  = s_lastState.nextRuptureInSeconds;
-			pkt.stableRemaining       = s_lastState.stableRemaining;
-			pkt.waveNumber            = s_lastState.waveNumber;
-			pkt.phase                 = static_cast<uint8_t>(s_lastState.phase);
-			pkt.waveType              = s_lastState.waveType;
-			pkt.paused                = s_lastState.paused ? 1 : 0;
-			// rawStage carries the server's EEnviroWaveStage so the client gets the
-			// authoritative stage enum (Fadeout vs Growback) instead of guessing.
-			pkt.rawStage              = (s_lastState.diag.rawStage >= 0)
-			                              ? static_cast<uint8_t>(s_lastState.diag.rawStage)
-			                              : 0;
-
-			Network::SendPacketToAllClients(hooks, g_self, pkt);
-			LOG_DEBUG("NetSync sent: phase=%d rem=%.1f nextRup=%.1f",
-				(int)pkt.phase, pkt.phaseRemainingSeconds, pkt.nextRuptureInSeconds);
-		}
-	}
-
-	DataExport::Update(deltaSeconds, s_lastState);
-	DataExport::UpdateDiagnosticLog(deltaSeconds, s_lastState);
-	HudOverlay::SetState(s_lastState);
-}
-
 // ---------------------------------------------------------------------------
 // Plugin exports
 // ---------------------------------------------------------------------------
@@ -182,32 +228,65 @@ __declspec(dllexport) bool PluginInit(IPluginSelf* self)
 		LOG_DEBUG("Registered world/save callbacks");
 	}
 
-	if (hooks->Engine)
-	{
-		hooks->Engine->RegisterOnTick(OnEngineTick);
-		LOG_DEBUG("Registered engine tick callback");
-	}
-
-	// Network sync — client registers a typed receive handler; server side sends
-	// in OnEngineTick.  IsServer() check is deferred to tick time because the
-	// network channel reports the correct side only after world init.
+	// Boot into server or client mode based on the network channel.
+	// IsServer() is reliable at PluginInit time per the SDK contract (plugin_network_helpers.h).
+	// The same DLL handles both modes: server broadcasts, client receives and displays.
 	if (hooks->Network)
 	{
-		Network::OnReceive<RuptureTimer::TimerSyncPacket>(
-			hooks, self,
-			[](const RuptureTimer::TimerSyncPacket& pkt)
+		if (hooks->Network->IsServer())
+		{
+			// ---- SERVER MODE ----
+			// Generate a unique session ID embedded in every broadcast packet so
+			// clients can lock onto one server and ignore competing broadcasts.
+			LOG_INFO("Mode: SERVER — will broadcast TimerSyncPacket to clients");
+			RuptureTimer::InitServerMode();
+
+			if (hooks->Engine)
 			{
-				RuptureTimer::ApplyNetworkSync(pkt);
-			});
-		LOG_DEBUG("Registered TimerSyncPacket receive handler");
+				hooks->Engine->RegisterOnTick(OnServerTick);
+				s_registeredTick = OnServerTick;
+				LOG_DEBUG("Registered OnServerTick");
+			}
+			// Server does not register an OnReceive handler — it only sends.
+		}
+		else
+		{
+			// ---- CLIENT MODE ----
+			// Register a receive handler that pairs to the first server heard from
+			// and ignores all subsequent competing servers (race condition guard).
+			LOG_INFO("Mode: CLIENT — will receive TimerSyncPacket from server");
+			Network::OnReceive<RuptureTimer::TimerSyncPacket>(
+				hooks, self,
+				[](const RuptureTimer::TimerSyncPacket& pkt)
+				{
+					RuptureTimer::ApplyNetworkSync(pkt);
+				});
+			LOG_DEBUG("Registered TimerSyncPacket receive handler");
+
+			if (hooks->Engine)
+			{
+				hooks->Engine->RegisterOnTick(OnClientTick);
+				s_registeredTick = OnClientTick;
+				LOG_DEBUG("Registered OnClientTick");
+			}
+		}
 	}
 	else
 	{
-		LOG_DEBUG("hooks->Network not available — network sync disabled");
+		// ---- LOCAL MODE ----
+		// No network channel (solo play, offline, or old modloader build).
+		// Fall back to reading game state directly from local actors.
+		LOG_DEBUG("hooks->Network not available — local-only mode");
+		if (hooks->Engine)
+		{
+			hooks->Engine->RegisterOnTick(OnLocalTick);
+			s_registeredTick = OnLocalTick;
+			LOG_DEBUG("Registered OnLocalTick");
+		}
 	}
 
 	// HUD overlay — only register if the overlay is enabled in config.
-	// hooks->HUD is null on server builds; Install() handles that gracefully.
+	// hooks->HUD is null on dedicated server builds; Install() handles that gracefully.
 	if (RuptureTimerConfig::Config::ShouldShowOverlay())
 	{
 		if (!HudOverlay::Install(hooks))
@@ -259,10 +338,11 @@ __declspec(dllexport) void PluginShutdown()
 			hooks->World->UnregisterOnAnyWorldBeginPlay(OnAnyWorldBeginPlay);
 			hooks->World->UnregisterOnSaveLoaded(OnSaveLoaded);
 		}
-		if (hooks->Engine)
-			hooks->Engine->UnregisterOnTick(OnEngineTick);
+		if (hooks->Engine && s_registeredTick)
+			hooks->Engine->UnregisterOnTick(s_registeredTick);
 	}
 
+	s_registeredTick = nullptr;
 	g_self = nullptr;
 }
 

@@ -78,18 +78,27 @@ namespace RuptureTimer
 	// ---------------------------------------------------------------------------
 	struct TimerSyncPacket
 	{
-		float   phaseRemainingSeconds;  // time left in current phase (-1 = unknown)
-		float   nextRuptureInSeconds;   // primary countdown value (-1 = unknown)
-		float   stableRemaining;        // stable-period duration (-1 = unknown)
-		int32_t waveNumber;             // ACrWaveTimerActor::NextPhase
-		uint8_t phase;                  // RupturePhase enum value
-		uint8_t waveType;               // 0=None 1=Heat 2=Cold
-		uint8_t paused;                 // 0/1
-		uint8_t rawStage;              // EEnviroWaveStage: 0=None 1=PreWave 2=Moving 3=Fadeout 4=Growback
+		float    phaseRemainingSeconds;  // time left in current phase (-1 = unknown)
+		float    nextRuptureInSeconds;   // primary countdown value (-1 = unknown)
+		float    stableRemaining;        // stable-period duration (-1 = unknown)
+		int32_t  waveNumber;             // ACrWaveTimerActor::NextPhase
+		uint32_t serverId;               // unique ID generated at server init; clients pair to first-seen ID
+		uint8_t  phase;                  // RupturePhase enum value
+		uint8_t  waveType;               // 0=None 1=Heat 2=Cold
+		uint8_t  paused;                 // 0/1
+		uint8_t  rawStage;               // EEnviroWaveStage: 0=None 1=PreWave 2=Moving 3=Fadeout 4=Growback
 	};
+	// Size: 4+4+4+4+4+1+1+1+1 = 24 bytes, naturally aligned.
+	// BREAKING CHANGE from the 20-byte v1 layout: both server and client must use the same build.
 
-	// Called from the Network::OnReceive handler in plugin.cpp (client side).
-	// Stores the packet with a local timestamp for interpolation.
+	// Server: call once after IsServer() is confirmed to generate a random serverId.
+	void InitServerMode();
+
+	// Server: returns the serverId embedded in every outgoing packet.
+	uint32_t GetServerId();
+
+	// Client: called from the Network::OnReceive handler in plugin.cpp.
+	// On first call, pairs to pkt.serverId and ignores packets from any other server thereafter.
 	void ApplyNetworkSync(const TimerSyncPacket& pkt);
 
 	// Read current rupture timer state from the game. Call only from game thread.
