@@ -26,18 +26,80 @@ struct NetworkSyncState
 };
 static NetworkSyncState s_netSync = {};
 
-// Stale threshold: if no packet has arrived in this many seconds, fall back
-// to the local computation paths (repActor / stateMachine).
+// Stale threshold: age at which a fresh packet is no longer considered live.
+// Once a client has paired to a server (s_everReceivedServerPacket == true)
+// it never falls back to local scanning even past this threshold — it shows
+// frozen last-known data instead (codePath = "netSync-stale").
 static constexpr float NET_SYNC_STALE_SEC = 30.0f;
+
+// Server-side: unique ID embedded in every broadcast packet so clients can
+// lock onto a specific server and ignore competing broadcasts.
+static uint32_t s_serverId = 0;
+
+// Client-side: set true on first successful packet receipt, never cleared.
+// Once true, ReadCurrentState() stays in server-authoritative mode.
+static bool     s_everReceivedServerPacket = false;
+static uint32_t s_pairedServerId           = 0;
+
+void InitServerMode()
+{
+	// Combine tick count with address entropy for a cheap session-unique ID.
+	// Not cryptographic — just needs to differ from other concurrently running servers.
+	s_serverId = static_cast<uint32_t>(GetTickCount64())
+	           ^ static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&s_serverId) >> 4);
+	LOG_INFO("Server mode init — serverId=0x%08X", s_serverId);
+}
+
+uint32_t GetServerId()
+{
+	return s_serverId;
+}
 
 void ApplyNetworkSync(const TimerSyncPacket& pkt)
 {
+	// Discard our own echoed broadcasts (modloader should not route these back, but be safe).
+	if (pkt.serverId == s_serverId)
+		return;
+
+	if (!s_everReceivedServerPacket)
+	{
+		// Election: lower serverId = started earlier = wins the broadcaster role.
+		// If the incoming ID is lower than ours, defer to that instance.
+		// If ours is lower, we are the broadcaster — discard and keep sending.
+		if (pkt.serverId < s_serverId)
+		{
+			s_pairedServerId           = pkt.serverId;
+			s_everReceivedServerPacket = true;
+			LOG_INFO("Broadcaster elected: deferring to 0x%08X (our id 0x%08X is later)",
+				pkt.serverId, s_serverId);
+		}
+		else
+		{
+			// We started earlier — the sender should defer to us, not the other way around.
+			LOG_DEBUG("Received broadcast from later instance 0x%08X — we (0x%08X) remain broadcaster",
+				pkt.serverId, s_serverId);
+			return;
+		}
+	}
+	else if (pkt.serverId != s_pairedServerId)
+	{
+		// Already deferred to a specific broadcaster; ignore all others.
+		LOG_DEBUG("Ignoring broadcast from 0x%08X (deferred to 0x%08X)",
+			pkt.serverId, s_pairedServerId);
+		return;
+	}
+
 	s_netSync.pkt          = pkt;
 	s_netSync.receivedAtMs = GetTickCount64();
 	s_netSync.valid        = true;
 	LOG_DEBUG("NetSync received: phase=%d rem=%.1f nextRup=%.1f waveType=%d",
 		(int)pkt.phase, pkt.phaseRemainingSeconds,
 		pkt.nextRuptureInSeconds, (int)pkt.waveType);
+}
+
+bool IsDeferredToExternalBroadcaster()
+{
+	return s_everReceivedServerPacket;
 }
 
 // ---------------------------------------------------------------------------
@@ -348,16 +410,23 @@ TimerState ReadCurrentState()
 	// Network sync path — must run BEFORE the stale-NextTime guard.
 	// The server broadcasts authoritative state independently of NextTime
 	// replication, so we can recover even when NextTime hasn't arrived yet.
+	//
+	// Three cases:
+	//   A. Fresh packet  — interpolate timers by elapsed wall-clock time, return.
+	//   B. Stale packet, but client has paired to a server this session
+	//      — stay in server-authoritative mode, show frozen last-known data,
+	//        do NOT fall through to repActor/stateMachine.
+	//   C. No packet or stale + never paired — fall through to local paths.
 	// ------------------------------------------------------------------
 	if (!waveSub && s_netSync.valid)
 	{
 		ULONGLONG ageMs = GetTickCount64() - s_netSync.receivedAtMs;
-		if (ageMs < static_cast<ULONGLONG>(NET_SYNC_STALE_SEC * 1000.0f))
+		bool fresh = ageMs < static_cast<ULONGLONG>(NET_SYNC_STALE_SEC * 1000.0f);
+
+		if (fresh || s_everReceivedServerPacket)
 		{
 			const TimerSyncPacket& p = s_netSync.pkt;
-			float elapsed = static_cast<float>(ageMs) / 1000.0f;
 
-			state.diag.codePath  = "netSync";
 			state.diag.rawStage  = static_cast<int>(p.rawStage);
 			state.phase    = static_cast<RupturePhase>(p.phase);
 			state.waveType = p.waveType;
@@ -391,17 +460,36 @@ TimerState ReadCurrentState()
 				default: state.waveTypeName = "None"; break;
 			}
 
-			auto Interp = [elapsed](float base) -> float {
-				return (base >= 0.0f) ? fmaxf(0.0f, base - elapsed) : -1.0f;
-			};
-			state.phaseRemainingSeconds = Interp(p.phaseRemainingSeconds);
-			state.nextRuptureInSeconds  = Interp(p.nextRuptureInSeconds);
-			state.stableRemaining       = Interp(p.stableRemaining);
+			if (fresh)
+			{
+				// Case A: live packet — interpolate timers down by elapsed wall-clock time.
+				float elapsed = static_cast<float>(ageMs) / 1000.0f;
+				auto Interp = [elapsed](float base) -> float {
+					return (base >= 0.0f) ? fmaxf(0.0f, base - elapsed) : -1.0f;
+				};
+				state.phaseRemainingSeconds = Interp(p.phaseRemainingSeconds);
+				state.nextRuptureInSeconds  = Interp(p.nextRuptureInSeconds);
+				state.stableRemaining       = Interp(p.stableRemaining);
+				state.diag.codePath = "netSync";
+			}
+			else
+			{
+				// Case B: stale, but committed to server authority.
+				// Show frozen last-known values; do not interpolate further to avoid
+				// driving displayed timers negative over a long outage.
+				state.phaseRemainingSeconds = p.phaseRemainingSeconds;
+				state.nextRuptureInSeconds  = p.nextRuptureInSeconds;
+				state.stableRemaining       = p.stableRemaining;
+				state.diag.codePath = "netSync-stale";
+				LOG_DEBUG("ReadCurrentState: netSync stale (%.0fs) — showing frozen server data",
+					static_cast<float>(ageMs) / 1000.0f);
+			}
 
 			return state;
 		}
-		// Packet is stale — fall through to repActor / stateMachine
-		LOG_DEBUG("ReadCurrentState: netSync packet is stale (%.0fs) — falling back",
+
+		// Case C path: stale packet and never paired — fall through.
+		LOG_DEBUG("ReadCurrentState: netSync packet is stale (%.0fs) and no prior pairing — falling back",
 			static_cast<float>(ageMs) / 1000.0f);
 	}
 
