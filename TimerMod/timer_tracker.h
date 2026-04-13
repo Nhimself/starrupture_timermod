@@ -35,6 +35,13 @@ namespace RuptureTimer
 		// Allows detecting offset misalignment without recompiling.
 		uint8_t      repActorBytes[8];      // raw bytes at repActor+0x02A8, zeroed if no repActor
 		bool         repActorBytesValid;    // true if repActorBytes was populated
+
+		// Game-internal phase name — what the engine actually reports, not our
+		// interpretation.  Populated by all code paths:
+		//   subsystem/repActor: EEnviroWaveStage name ("None","PreWave","Moving","Fadeout","Growback")
+		//   stateMachine:       NextPhase label       ("NP0=Stable","NP1=PreWave","NP2=Moving","NP3=PostWave")
+		//   netSync:            received RupturePhase  ("netSync:Stable", etc.)
+		const char*  rawPhaseName;
 	};
 
 	struct TimerState
@@ -78,7 +85,7 @@ namespace RuptureTimer
 		uint8_t phase;                  // RupturePhase enum value
 		uint8_t waveType;               // 0=None 1=Heat 2=Cold
 		uint8_t paused;                 // 0/1
-		uint8_t pad;                    // keep struct size a multiple of 4
+		uint8_t rawStage;              // EEnviroWaveStage: 0=None 1=PreWave 2=Moving 3=Fadeout 4=Growback
 	};
 
 	// Called from the Network::OnReceive handler in plugin.cpp (client side).
