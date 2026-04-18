@@ -15,94 +15,6 @@ namespace RuptureTimer
 {
 
 // ---------------------------------------------------------------------------
-// Network sync state — written by ApplyNetworkSync() when a TimerSyncPacket
-// arrives from the server plugin, read by ReadCurrentState() on every tick.
-// ---------------------------------------------------------------------------
-struct NetworkSyncState
-{
-	TimerSyncPacket pkt;
-	ULONGLONG       receivedAtMs;  // GetTickCount64() at time of receipt
-	bool            valid;
-};
-static NetworkSyncState s_netSync = {};
-
-// Stale threshold: age at which a fresh packet is no longer considered live.
-// Once a client has paired to a server (s_everReceivedServerPacket == true)
-// it never falls back to local scanning even past this threshold — it shows
-// frozen last-known data instead (codePath = "netSync-stale").
-static constexpr float NET_SYNC_STALE_SEC = 30.0f;
-
-// Server-side: unique ID embedded in every broadcast packet so clients can
-// lock onto a specific server and ignore competing broadcasts.
-static uint32_t s_serverId = 0;
-
-// Client-side: set true on first successful packet receipt, never cleared.
-// Once true, ReadCurrentState() stays in server-authoritative mode.
-static bool     s_everReceivedServerPacket = false;
-static uint32_t s_pairedServerId           = 0;
-
-void InitServerMode()
-{
-	// Combine tick count with address entropy for a cheap session-unique ID.
-	// Not cryptographic — just needs to differ from other concurrently running servers.
-	s_serverId = static_cast<uint32_t>(GetTickCount64())
-	           ^ static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&s_serverId) >> 4);
-	LOG_INFO("Server mode init — serverId=0x%08X", s_serverId);
-}
-
-uint32_t GetServerId()
-{
-	return s_serverId;
-}
-
-void ApplyNetworkSync(const TimerSyncPacket& pkt)
-{
-	// Discard our own echoed broadcasts (modloader should not route these back, but be safe).
-	if (pkt.serverId == s_serverId)
-		return;
-
-	if (!s_everReceivedServerPacket)
-	{
-		// Election: lower serverId = started earlier = wins the broadcaster role.
-		// If the incoming ID is lower than ours, defer to that instance.
-		// If ours is lower, we are the broadcaster — discard and keep sending.
-		if (pkt.serverId < s_serverId)
-		{
-			s_pairedServerId           = pkt.serverId;
-			s_everReceivedServerPacket = true;
-			LOG_INFO("Broadcaster elected: deferring to 0x%08X (our id 0x%08X is later)",
-				pkt.serverId, s_serverId);
-		}
-		else
-		{
-			// We started earlier — the sender should defer to us, not the other way around.
-			LOG_DEBUG("Received broadcast from later instance 0x%08X — we (0x%08X) remain broadcaster",
-				pkt.serverId, s_serverId);
-			return;
-		}
-	}
-	else if (pkt.serverId != s_pairedServerId)
-	{
-		// Already deferred to a specific broadcaster; ignore all others.
-		LOG_DEBUG("Ignoring broadcast from 0x%08X (deferred to 0x%08X)",
-			pkt.serverId, s_pairedServerId);
-		return;
-	}
-
-	s_netSync.pkt          = pkt;
-	s_netSync.receivedAtMs = GetTickCount64();
-	s_netSync.valid        = true;
-	LOG_DEBUG("NetSync received: phase=%d rem=%.1f nextRup=%.1f waveType=%d",
-		(int)pkt.phase, pkt.phaseRemainingSeconds,
-		pkt.nextRuptureInSeconds, (int)pkt.waveType);
-}
-
-bool IsDeferredToExternalBroadcaster()
-{
-	return s_everReceivedServerPacket;
-}
-
-// ---------------------------------------------------------------------------
 // Find UCrEnviroWaveSubsystem by iterating GObjects for the given world.
 // World subsystems are UObjects whose Outer is the UWorld instance.
 // ---------------------------------------------------------------------------
@@ -407,95 +319,7 @@ TimerState ReadCurrentState()
 		waveSub ? "FOUND" : "absent", nextTimeRemaining, timerActor->NextPhase);
 
 	// ------------------------------------------------------------------
-	// Network sync path — must run BEFORE the stale-NextTime guard.
-	// The server broadcasts authoritative state independently of NextTime
-	// replication, so we can recover even when NextTime hasn't arrived yet.
-	//
-	// Three cases:
-	//   A. Fresh packet  — interpolate timers by elapsed wall-clock time, return.
-	//   B. Stale packet, but client has paired to a server this session
-	//      — stay in server-authoritative mode, show frozen last-known data,
-	//        do NOT fall through to repActor/stateMachine.
-	//   C. No packet or stale + never paired — fall through to local paths.
-	// ------------------------------------------------------------------
-	if (!waveSub && s_netSync.valid)
-	{
-		ULONGLONG ageMs = GetTickCount64() - s_netSync.receivedAtMs;
-		bool fresh = ageMs < static_cast<ULONGLONG>(NET_SYNC_STALE_SEC * 1000.0f);
-
-		if (fresh || s_everReceivedServerPacket)
-		{
-			const TimerSyncPacket& p = s_netSync.pkt;
-
-			state.diag.rawStage  = static_cast<int>(p.rawStage);
-			state.phase    = static_cast<RupturePhase>(p.phase);
-			state.waveType = p.waveType;
-			state.paused   = (p.paused != 0);
-			state.waveNumber = p.waveNumber;
-
-			// rawPhaseName from the server's authoritative EEnviroWaveStage
-			switch (p.rawStage)
-			{
-				case 0:  state.diag.rawPhaseName = "None";     break; // EEnviroWaveStage::None
-				case 1:  state.diag.rawPhaseName = "PreWave";  break;
-				case 2:  state.diag.rawPhaseName = "Moving";   break;
-				case 3:  state.diag.rawPhaseName = "Fadeout";  break;
-				case 4:  state.diag.rawPhaseName = "Growback"; break;
-				default: state.diag.rawPhaseName = "Stage?";   break;
-			}
-
-			switch (state.phase)
-			{
-				case RupturePhase::Stable:      state.phaseName = "Stable";      break;
-				case RupturePhase::Warning:     state.phaseName = "Warning";     break;
-				case RupturePhase::Burning:     state.phaseName = "Burning";     break;
-				case RupturePhase::Cooling:     state.phaseName = "Cooling";     break;
-				case RupturePhase::Stabilizing: state.phaseName = "Stabilizing"; break;
-				default:                        state.phaseName = "Unknown";     break;
-			}
-			switch (state.waveType)
-			{
-				case 1:  state.waveTypeName = "Heat"; break;
-				case 2:  state.waveTypeName = "Cold"; break;
-				default: state.waveTypeName = "None"; break;
-			}
-
-			if (fresh)
-			{
-				// Case A: live packet — interpolate timers down by elapsed wall-clock time.
-				float elapsed = static_cast<float>(ageMs) / 1000.0f;
-				auto Interp = [elapsed](float base) -> float {
-					return (base >= 0.0f) ? fmaxf(0.0f, base - elapsed) : -1.0f;
-				};
-				state.phaseRemainingSeconds = Interp(p.phaseRemainingSeconds);
-				state.nextRuptureInSeconds  = Interp(p.nextRuptureInSeconds);
-				state.stableRemaining       = Interp(p.stableRemaining);
-				state.diag.codePath = "netSync";
-			}
-			else
-			{
-				// Case B: stale, but committed to server authority.
-				// Show frozen last-known values; do not interpolate further to avoid
-				// driving displayed timers negative over a long outage.
-				state.phaseRemainingSeconds = p.phaseRemainingSeconds;
-				state.nextRuptureInSeconds  = p.nextRuptureInSeconds;
-				state.stableRemaining       = p.stableRemaining;
-				state.diag.codePath = "netSync-stale";
-				LOG_DEBUG("ReadCurrentState: netSync stale (%.0fs) — showing frozen server data",
-					static_cast<float>(ageMs) / 1000.0f);
-			}
-
-			return state;
-		}
-
-		// Case C path: stale packet and never paired — fall through.
-		LOG_DEBUG("ReadCurrentState: netSync packet is stale (%.0fs) and no prior pairing — falling back",
-			static_cast<float>(ageMs) / 1000.0f);
-	}
-
-	// ------------------------------------------------------------------
-	// Stale NextTime guard — only blocks paths that derive timing from
-	// NextTime (repActor timing, stateMachine).  netSync already handled.
+	// Stale NextTime guard — blocks paths that derive timing from NextTime.
 	// repActor can still identify the current phase even without timing.
 	// ------------------------------------------------------------------
 	bool nextTimeValid = (rawUnclamped >= -60.0f);
@@ -509,8 +333,7 @@ TimerState ReadCurrentState()
 		// Try ACrGatherableSpawnersRepActor — a replicated actor present on all clients.
 		// It holds RepEnviroWaveTypeChange and RepEnviroWaveStageChange as persistent
 		// Net/RepNotify fields, giving us accurate phase and wave-type labels even
-		// when NextTime is stale.  Timing fields are left at -1 when nextTimeValid
-		// is false; the netSync path (above) will supply timing once a packet arrives.
+		// when NextTime is stale.  Timing fields are left at -1 when nextTimeValid is false.
 		SDK::ACrGatherableSpawnersRepActor* repActor = FindGatherableSpawnersRepActor(world);
 		if (repActor)
 		{
@@ -635,7 +458,6 @@ TimerState ReadCurrentState()
 		{
 			// No subsystem, no repActor, and NextTime is too stale for stateMachine.
 			// The plugin on this client has nothing to work with yet.
-			// The netSync path (above) will recover once the server broadcasts a packet.
 			state.diag.codePath = "none";
 			state.phase     = RupturePhase::Unknown;
 			state.phaseName = "Waiting";
