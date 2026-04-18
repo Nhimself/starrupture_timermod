@@ -39,9 +39,11 @@ static RuptureTimer::TimerState s_state = {};
 // seconds) or when the phase itself changes.
 //
 // SNAP_THRESHOLD: server-clock corrections are typically < 2 s in UE5 net
-// play.  3 s absorbs those while still catching legitimate phase-change jumps.
+// play.  10 s absorbs those and any QPC drift over long stable periods (the
+// stable phase runs ~45 min) while still catching legitimate phase-change
+// jumps, which are always >= 30 s.
 // ---------------------------------------------------------------------------
-static constexpr float SNAP_THRESHOLD = 3.0f;
+static constexpr float SNAP_THRESHOLD = 10.0f;
 
 static float s_dispNextRup   = -1.0f;
 static float s_dispPhaseRem  = -1.0f;
