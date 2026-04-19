@@ -41,6 +41,16 @@ namespace RuptureTimer
 		//   subsystem/repActor: EEnviroWaveStage name ("None","PreWave","Moving","Fadeout","Growback")
 		//   stateMachine:       NextPhase label       ("NP0=Stable","NP1=PreWave","NP2=Moving","NP3=PostWave")
 		const char*  rawPhaseName;
+
+		// Substage fields — populated by the subsystem path only.
+		// Allow us to see what the game internally calls each sub-step of
+		// Fadeout (FireWave/Burning/Fading), Growback (MoonPhase/RegrowthStart/Regrowth),
+		// and PreWave (BeforeExplosion/AfterExplosion).
+		// -1 means the stage is not active or the subsystem is absent.
+		int          rawFadeoutSubstage;    // EEnviroWaveFadeoutSubstage as int (-1 if not applicable)
+		int          rawGrowbackSubstage;   // EEnviroWaveGrowbackSubstage as int (-1 if not applicable)
+		int          rawPreWaveSubstage;    // EEnviroWavePreWaveSubstage as int (-1 if not applicable)
+		const char*  rawSubstageName;       // human-readable name of the active substage (or "None")
 	};
 
 	struct TimerState

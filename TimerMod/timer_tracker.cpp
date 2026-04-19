@@ -278,6 +278,10 @@ TimerState ReadCurrentState()
 	memset(state.diag.repActorBytes, 0, sizeof(state.diag.repActorBytes));
 	state.diag.repActorBytesValid  = false;
 	state.diag.rawPhaseName        = "?";
+	state.diag.rawFadeoutSubstage  = -1;
+	state.diag.rawGrowbackSubstage = -1;
+	state.diag.rawPreWaveSubstage  = -1;
+	state.diag.rawSubstageName     = "None";
 
 	SDK::UWorld* world = SDK::UWorld::GetWorld();
 	if (!world) { LOG_WARN_ONCE("ReadCurrentState: UWorld is null"); return state; }
@@ -490,8 +494,55 @@ TimerState ReadCurrentState()
 		case SDK::EEnviroWaveStage::Growback: state.diag.rawPhaseName = "Growback"; break;
 		default:                              state.diag.rawPhaseName = "Stage?";   break;
 	}
-	LOG_DEBUG("ReadCurrentState: subsystem stage=%d waveType=%d nextTimeRemaining=%.1f",
-		static_cast<int>(stage), static_cast<int>(waveType), nextTimeRemaining);
+	// Read substage fields — only meaningful when the corresponding top-level stage is active.
+	// Gives us the game's internal sub-step name so we can compare against in-game UI labels.
+	switch (stage)
+	{
+		case SDK::EEnviroWaveStage::PreWave:
+		{
+			int sub = static_cast<int>(waveSub->CurrentPreWaveSubstage);
+			state.diag.rawPreWaveSubstage = sub;
+			switch (waveSub->CurrentPreWaveSubstage)
+			{
+				case SDK::EEnviroWavePreWaveSubstage::BeforeExplosion: state.diag.rawSubstageName = "BeforeExplosion"; break;
+				case SDK::EEnviroWavePreWaveSubstage::AfterExplosion:  state.diag.rawSubstageName = "AfterExplosion";  break;
+				default:                                                state.diag.rawSubstageName = "None";            break;
+			}
+			break;
+		}
+		case SDK::EEnviroWaveStage::Fadeout:
+		{
+			int sub = static_cast<int>(waveSub->CurrentFadeoutSubstage);
+			state.diag.rawFadeoutSubstage = sub;
+			switch (waveSub->CurrentFadeoutSubstage)
+			{
+				case SDK::EEnviroWaveFadeoutSubstage::FireWave: state.diag.rawSubstageName = "FireWave"; break;
+				case SDK::EEnviroWaveFadeoutSubstage::Burning:  state.diag.rawSubstageName = "Burning";  break;
+				case SDK::EEnviroWaveFadeoutSubstage::Fading:   state.diag.rawSubstageName = "Fading";   break;
+				default:                                         state.diag.rawSubstageName = "None";     break;
+			}
+			break;
+		}
+		case SDK::EEnviroWaveStage::Growback:
+		{
+			int sub = static_cast<int>(waveSub->CurrentGrowbackSubstage);
+			state.diag.rawGrowbackSubstage = sub;
+			switch (waveSub->CurrentGrowbackSubstage)
+			{
+				case SDK::EEnviroWaveGrowbackSubstage::MoonPhase:     state.diag.rawSubstageName = "MoonPhase";     break;
+				case SDK::EEnviroWaveGrowbackSubstage::RegrowthStart: state.diag.rawSubstageName = "RegrowthStart"; break;
+				case SDK::EEnviroWaveGrowbackSubstage::Regrowth:      state.diag.rawSubstageName = "Regrowth";      break;
+				default:                                               state.diag.rawSubstageName = "None";          break;
+			}
+			break;
+		}
+		default:
+			break;
+	}
+
+	LOG_DEBUG("ReadCurrentState: subsystem stage=%d waveType=%d substage=%s nextTimeRemaining=%.1f",
+		static_cast<int>(stage), static_cast<int>(waveType),
+		state.diag.rawSubstageName, nextTimeRemaining);
 
 	if (stage == SDK::EEnviroWaveStage::None)
 	{

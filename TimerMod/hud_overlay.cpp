@@ -260,7 +260,7 @@ static void OnPostRender(void* hudPtr)
 		if (s_state.stableRemaining      >= 0.0f) extendedLines++;
 	}
 
-	const int debugLines = debugInfo ? 2 : 0;
+	const int debugLines = debugInfo ? 3 : 0;
 	const int totalLines = 3 + extendedLines + debugLines;
 
 	float x, y;
@@ -356,6 +356,17 @@ static void OnPostRender(void* hudPtr)
 			s_state.nextRuptureInSeconds,
 			s_state.paused ? "PAUSED" : "");
 		DrawLine(self, x, curY, scale, dbg2);
+		curY += lineH;
+
+		// Substage line — populated only in subsystem path; shows "None" otherwise.
+		// Compare against what the in-game UI displays to find name mismatches.
+		char dbg3[80];
+		_snprintf_s(dbg3, sizeof(dbg3), _TRUNCATE, "[Substage:%s FO:%d GB:%d PW:%d]",
+			s_state.diag.rawSubstageName  ? s_state.diag.rawSubstageName : "?",
+			s_state.diag.rawFadeoutSubstage,
+			s_state.diag.rawGrowbackSubstage,
+			s_state.diag.rawPreWaveSubstage);
+		DrawLine(self, x, curY, scale, dbg3);
 	}
 }
 
