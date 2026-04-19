@@ -151,6 +151,24 @@ static void UpdateClientPhaseStateMachine(float /*serverTime*/, float nextTimeRe
 // ---------------------------------------------------------------------------
 static void FillStateFromStateMachine(TimerState& state, float nextTimeRemaining)
 {
+	// Log when the resolved phase changes — captures Cooling↔Stabilizing within nextPhase==3.
+	static RupturePhase s_lastFilledPhase = RupturePhase::Unknown;
+	if (s_tracker.phase != s_lastFilledPhase)
+	{
+		const char* name = "Unknown";
+		switch (s_tracker.phase)
+		{
+			case RupturePhase::Stable:      name = "Stable";      break;
+			case RupturePhase::Warning:     name = "Warning";     break;
+			case RupturePhase::Burning:     name = "Burning";     break;
+			case RupturePhase::Cooling:     name = "Cooling";     break;
+			case RupturePhase::Stabilizing: name = "Stabilizing"; break;
+			default: break;
+		}
+		LOG_INFO("StateMachine phase: %s (nextTimeRemaining=%.1f)", name, nextTimeRemaining);
+		s_lastFilledPhase = s_tracker.phase;
+	}
+
 	switch (s_tracker.phase)
 	{
 		case RupturePhase::Stable:
@@ -319,8 +337,21 @@ TimerState ReadCurrentState()
 	// once per tick; the early-out paths below avoid redundant work.
 	SDK::UCrEnviroWaveSubsystem* waveSub = FindEnviroWaveSubsystem(world);
 	state.diag.hasSubsystem = (waveSub != nullptr);
-	LOG_DEBUG("ReadCurrentState: waveSub=%s nextTimeRemaining=%.1f waveNumber=%d",
-		waveSub ? "FOUND" : "absent", nextTimeRemaining, timerActor->NextPhase);
+
+	// Log only when something meaningful changes — nextPhase transition or subsystem presence flip.
+	{
+		static bool     s_hadSub      = false;
+		static int32_t  s_lastNP      = -999;
+		bool subChanged = (waveSub != nullptr) != s_hadSub;
+		bool npChanged  = timerActor->NextPhase != s_lastNP;
+		if (subChanged || npChanged)
+		{
+			LOG_DEBUG("ReadCurrentState: waveSub=%s nextTimeRemaining=%.1f waveNumber=%d→%d",
+				waveSub ? "FOUND" : "absent", nextTimeRemaining, s_lastNP, timerActor->NextPhase);
+			s_hadSub  = (waveSub != nullptr);
+			s_lastNP  = timerActor->NextPhase;
+		}
+	}
 
 	// ------------------------------------------------------------------
 	// Stale NextTime guard — blocks paths that derive timing from NextTime.
@@ -332,7 +363,7 @@ TimerState ReadCurrentState()
 
 	if (!waveSub)
 	{
-		LOG_DEBUG("ReadCurrentState: UCrEnviroWaveSubsystem absent — using replication-actor mode");
+		LOG_DEBUG_ONCE("ReadCurrentState: UCrEnviroWaveSubsystem absent — using replication-actor mode");
 
 		// Try ACrGatherableSpawnersRepActor — a replicated actor present on all clients.
 		// It holds RepEnviroWaveTypeChange and RepEnviroWaveStageChange as persistent
@@ -370,8 +401,23 @@ TimerState ReadCurrentState()
 				default:                              state.diag.rawPhaseName = "Stage?";   break;
 			}
 
-			LOG_DEBUG("ReadCurrentState: repActor FOUND — repStage=%d repWave=%d nextTimeValid=%s",
-				static_cast<int>(repStage), static_cast<int>(repWave), nextTimeValid ? "Y" : "N");
+			// Log all available values on any change — gives the correlation data between
+			// what the engine reports and what the in-game UI displays.
+			{
+				static int s_lastStage = -1;
+				static int s_lastWave  = -1;
+				int curStage = static_cast<int>(repStage);
+				int curWave  = static_cast<int>(repWave);
+				if (curStage != s_lastStage || curWave != s_lastWave)
+				{
+					LOG_INFO("[WaveState/repActor] Stage=%s(%d) Wave=%s(%d) nextTimeRemaining=%.1f",
+						state.diag.rawPhaseName, curStage,
+						state.waveTypeName, curWave,
+						nextTimeRemaining);
+					s_lastStage = curStage;
+					s_lastWave  = curWave;
+				}
+			}
 
 			state.waveType = static_cast<uint8_t>(repWave);
 			switch (repWave)
@@ -450,7 +496,7 @@ TimerState ReadCurrentState()
 				case 3:  state.diag.rawPhaseName = "NP3=PostWave"; break;
 				default: state.diag.rawPhaseName = "NP?=Unknown";  break;
 			}
-			LOG_DEBUG("ReadCurrentState: repActor absent — using client-side phase state machine");
+			LOG_DEBUG_ONCE("ReadCurrentState: repActor absent — using client-side phase state machine");
 
 			UpdateClientPhaseStateMachine(
 				(float)serverTime, nextTimeRemaining,
@@ -540,9 +586,34 @@ TimerState ReadCurrentState()
 			break;
 	}
 
-	LOG_DEBUG("ReadCurrentState: subsystem stage=%d waveType=%d substage=%s nextTimeRemaining=%.1f",
-		static_cast<int>(stage), static_cast<int>(waveType),
-		state.diag.rawSubstageName, nextTimeRemaining);
+	// Log all four enum values together on any change — gives the full correlation between
+	// engine-internal names and what the in-game UI displays.
+	{
+		static int s_lastStage = -1;
+		static int s_lastWave  = -1;
+		static int s_lastFO    = -1;
+		static int s_lastGB    = -1;
+		static int s_lastPW    = -1;
+		int curStage = static_cast<int>(stage);
+		int curWave  = static_cast<int>(waveType);
+		int curFO    = state.diag.rawFadeoutSubstage;
+		int curGB    = state.diag.rawGrowbackSubstage;
+		int curPW    = state.diag.rawPreWaveSubstage;
+		if (curStage != s_lastStage || curWave != s_lastWave ||
+		    curFO != s_lastFO || curGB != s_lastGB || curPW != s_lastPW)
+		{
+			LOG_INFO("[WaveState/subsystem] Stage=%s(%d) Wave=%s(%d) Substage=%s PW=%d FO=%d GB=%d",
+				state.diag.rawPhaseName, curStage,
+				state.waveTypeName, curWave,
+				state.diag.rawSubstageName,
+				curPW, curFO, curGB);
+			s_lastStage = curStage;
+			s_lastWave  = curWave;
+			s_lastFO    = curFO;
+			s_lastGB    = curGB;
+			s_lastPW    = curPW;
+		}
+	}
 
 	if (stage == SDK::EEnviroWaveStage::None)
 	{
