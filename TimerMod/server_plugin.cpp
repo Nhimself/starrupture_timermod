@@ -20,8 +20,10 @@
 static IPluginSelf* g_self = nullptr;
 IPluginSelf* GetSelf() { return g_self; }
 
+// Plugin name must match the client plugin so the modloader routes messages by
+// (pluginName + typeTag) to the correct RegisterMessageHandler subscription.
 static PluginInfo s_pluginInfo = {
-	"RuptureTimerServer",
+	"RuptureTimer",
 	MODLOADER_BUILD_TAG,
 	"Nhimself",
 	"Server-side companion: reads UCrEnviroWaveSubsystem and broadcasts WaveStatePacket to all clients.",
@@ -29,16 +31,25 @@ static PluginInfo s_pluginInfo = {
 };
 
 // ---------------------------------------------------------------------------
-// Object cache — find UCrEnviroWaveSubsystem once per world load.
+// Object cache — find UCrEnviroWaveSubsystem on the server.
+// Retries every scan until found (subsystem may not be in GObjects yet at
+// world-begin), then caches permanently for the lifetime of the world.
 // ---------------------------------------------------------------------------
-static SDK::UWorld*                 s_cachedWorld = nullptr;
-static SDK::UCrEnviroWaveSubsystem* s_cachedSub   = nullptr;
+static SDK::UWorld*                 s_cachedWorld  = nullptr;
+static SDK::UCrEnviroWaveSubsystem* s_cachedSub    = nullptr;
+static int                          s_scanAttempts = 0;
 
 static SDK::UCrEnviroWaveSubsystem* FindSubsystem(SDK::UWorld* world)
 {
-	if (world == s_cachedWorld) return s_cachedSub;
-	s_cachedWorld = world;
-	s_cachedSub   = nullptr;
+	if (world != s_cachedWorld)
+	{
+		s_cachedWorld  = world;
+		s_cachedSub    = nullptr;
+		s_scanAttempts = 0;
+	}
+	if (s_cachedSub) return s_cachedSub;
+
+	s_scanAttempts++;
 	SDK::TUObjectArray* arr = SDK::UObject::GObjects.GetTypedPtr();
 	if (!arr) return nullptr;
 	const SDK::UObject* cdo = SDK::UCrEnviroWaveSubsystem::GetDefaultObj();
@@ -49,10 +60,14 @@ static SDK::UCrEnviroWaveSubsystem* FindSubsystem(SDK::UWorld* world)
 		if (obj->Class->GetName() == "CrEnviroWaveSubsystem")
 		{
 			s_cachedSub = static_cast<SDK::UCrEnviroWaveSubsystem*>(obj);
-			break;
+			LOG_INFO("UCrEnviroWaveSubsystem found after %d scan(s)", s_scanAttempts);
+			return s_cachedSub;
 		}
 	}
-	return s_cachedSub;
+	// Log periodically so we can tell if the name or CDO skip is the problem.
+	if (s_scanAttempts == 1 || s_scanAttempts == 30 || s_scanAttempts == 300)
+		LOG_WARN("UCrEnviroWaveSubsystem not found after %d scan(s) — still searching", s_scanAttempts);
+	return nullptr;
 }
 
 // ---------------------------------------------------------------------------
