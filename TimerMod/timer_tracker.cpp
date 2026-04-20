@@ -352,6 +352,14 @@ TimerState ReadCurrentState()
 	state.diag.rawNextPhase         = timerActor->NextPhase;
 	state.diag.rawPaused            = timerActor->bPause;
 
+	// ------------------------------------------------------------------
+	// Stale NextTime guard — blocks paths that derive timing from NextTime.
+	// repActor can still identify the current phase even without timing.
+	// ------------------------------------------------------------------
+	bool nextTimeValid = (rawUnclamped >= -60.0f);
+	if (!nextTimeValid)
+		LOG_WARN_ONCE("ReadCurrentState: NextTime is %.0fs in the past — timing unavailable, phase detection only", rawUnclamped);
+
 	// Refresh cached object pointers — O(GObjects) scan only on world change
 	// or NextPhase transition, not every tick.
 	RefreshObjectCache(world, timerActor->NextPhase);
@@ -382,14 +390,6 @@ TimerState ReadCurrentState()
 			s_lastNTValid = nextTimeValid;
 		}
 	}
-
-	// ------------------------------------------------------------------
-	// Stale NextTime guard — blocks paths that derive timing from NextTime.
-	// repActor can still identify the current phase even without timing.
-	// ------------------------------------------------------------------
-	bool nextTimeValid = (rawUnclamped >= -60.0f);
-	if (!nextTimeValid)
-		LOG_WARN_ONCE("ReadCurrentState: NextTime is %.0fs in the past — timing unavailable, phase detection only", rawUnclamped);
 
 	if (!waveSub)
 	{
