@@ -15,52 +15,69 @@ namespace RuptureTimer
 {
 
 // ---------------------------------------------------------------------------
-// Find UCrEnviroWaveSubsystem by iterating GObjects for the given world.
-// World subsystems are UObjects whose Outer is the UWorld instance.
+// Cached GObjects scan — avoids O(n) iteration every tick.
+//
+// UCrEnviroWaveSubsystem:        scanned once per world load (never changes).
+// ACrGatherableSpawnersRepActor: re-scanned on NextPhase change only
+//                                (may appear when a wave starts).
+// Both CDOs are skipped; they have all fields at zero and never update.
 // ---------------------------------------------------------------------------
+struct ObjectCache
+{
+	SDK::UWorld*                        world        = nullptr;
+	SDK::UCrEnviroWaveSubsystem*        sub          = nullptr;
+	bool                                subScanned   = false;
+	SDK::ACrGatherableSpawnersRepActor* repActor     = nullptr;
+	int32_t                             lastRepScanNP = -999;
+};
+static ObjectCache s_objCache;
 
-static SDK::UCrEnviroWaveSubsystem* FindEnviroWaveSubsystem(SDK::UWorld* /*world*/)
+static void RunObjectScan(bool scanSub, bool scanRep)
 {
 	SDK::TUObjectArray* arr = SDK::UObject::GObjects.GetTypedPtr();
-	if (!arr) return nullptr;
+	if (!arr) return;
 
-	// Skip the Class Default Object — it has all fields at zero and never
-	// updates.  GetDefaultObj() returns it directly so we can compare by pointer.
-	const SDK::UObject* cdo = SDK::UCrEnviroWaveSubsystem::GetDefaultObj();
+	const SDK::UObject* subCDO = scanSub ? SDK::UCrEnviroWaveSubsystem::GetDefaultObj()         : nullptr;
+	const SDK::UObject* repCDO = scanRep ? SDK::ACrGatherableSpawnersRepActor::GetDefaultObj()   : nullptr;
 
-	for (int i = 0; i < arr->Num(); i++)
+	bool doneSub = !scanSub;
+	bool doneRep = !scanRep;
+
+	for (int i = 0; i < arr->Num() && (!doneSub || !doneRep); i++)
 	{
 		SDK::UObject* obj = arr->GetByIndex(i);
 		if (!obj || !obj->Class) continue;
-		if (obj == cdo) continue;
-		if (obj->Class->GetName() == "CrEnviroWaveSubsystem")
-			return static_cast<SDK::UCrEnviroWaveSubsystem*>(obj);
+
+		if (!doneRep && obj != repCDO && obj->Class->GetName() == "CrGatherableSpawnersRepActor")
+		{
+			s_objCache.repActor = static_cast<SDK::ACrGatherableSpawnersRepActor*>(obj);
+			doneRep = true;
+			continue;
+		}
+		if (!doneSub && obj != subCDO && obj->Class->GetName() == "CrEnviroWaveSubsystem")
+		{
+			s_objCache.sub = static_cast<SDK::UCrEnviroWaveSubsystem*>(obj);
+			doneSub = true;
+			continue;
+		}
 	}
-	return nullptr;
+	if (scanSub) s_objCache.subScanned = true;
 }
 
-// ---------------------------------------------------------------------------
-// Find ACrGatherableSpawnersRepActor — a replicated actor present on all
-// clients (including dedicated server clients). It carries two Net/RepNotify
-// fields that store the current wave type and stage, making it usable as a
-// fallback phase source when UCrEnviroWaveSubsystem is absent.
-// ---------------------------------------------------------------------------
-static SDK::ACrGatherableSpawnersRepActor* FindGatherableSpawnersRepActor(SDK::UWorld* /*world*/)
+static void RefreshObjectCache(SDK::UWorld* world, int32_t nextPhase)
 {
-	SDK::TUObjectArray* arr = SDK::UObject::GObjects.GetTypedPtr();
-	if (!arr) return nullptr;
-
-	const SDK::UObject* cdo = SDK::ACrGatherableSpawnersRepActor::GetDefaultObj();
-
-	for (int i = 0; i < arr->Num(); i++)
+	if (world != s_objCache.world)
 	{
-		SDK::UObject* obj = arr->GetByIndex(i);
-		if (!obj || !obj->Class) continue;
-		if (obj == cdo) continue;
-		if (obj->Class->GetName() == "CrGatherableSpawnersRepActor")
-			return static_cast<SDK::ACrGatherableSpawnersRepActor*>(obj);
+		s_objCache          = ObjectCache{};
+		s_objCache.world    = world;
 	}
-	return nullptr;
+
+	bool needSub = !s_objCache.subScanned;
+	bool needRep = (s_objCache.repActor == nullptr) && (nextPhase != s_objCache.lastRepScanNP);
+	if (needRep) s_objCache.lastRepScanNP = nextPhase;
+
+	if (needSub || needRep)
+		RunObjectScan(needSub, needRep);
 }
 
 // ---------------------------------------------------------------------------
@@ -335,29 +352,34 @@ TimerState ReadCurrentState()
 	state.diag.rawNextPhase         = timerActor->NextPhase;
 	state.diag.rawPaused            = timerActor->bPause;
 
-	// Discover the wave subsystem early — we need to know whether we're on a
-	// local/listen-server (subsystem present) or dedicated-server client before
-	// deciding which path to take.  Subsystem lookup is O(GObjects) so it runs
-	// once per tick; the early-out paths below avoid redundant work.
-	SDK::UCrEnviroWaveSubsystem* waveSub = FindEnviroWaveSubsystem(world);
+	// Refresh cached object pointers — O(GObjects) scan only on world change
+	// or NextPhase transition, not every tick.
+	RefreshObjectCache(world, timerActor->NextPhase);
+	SDK::UCrEnviroWaveSubsystem* waveSub = s_objCache.sub;
 	state.diag.hasSubsystem = (waveSub != nullptr);
 
 	// Log only when something meaningful changes — nextPhase transition, subsystem presence, or pause flag.
 	{
-		static bool     s_hadSub      = false;
-		static int32_t  s_lastNP      = -999;
-		static bool     s_lastPaused  = false;
+		static bool     s_hadSub        = false;
+		static int32_t  s_lastNP        = -999;
+		static bool     s_lastPaused    = false;
+		static bool     s_lastNTValid   = false;
 		bool subChanged    = (waveSub != nullptr) != s_hadSub;
 		bool npChanged     = timerActor->NextPhase != s_lastNP;
 		bool pauseChanged  = timerActor->bPause != s_lastPaused;
-		if (subChanged || npChanged || pauseChanged)
+		bool ntValidChanged = nextTimeValid != s_lastNTValid;
+		if (subChanged || npChanged || pauseChanged || ntValidChanged)
 		{
-			LOG_DEBUG("ReadCurrentState: waveSub=%s nextTimeRemaining=%.1f waveNumber=%d→%d paused=%s",
-				waveSub ? "FOUND" : "absent", nextTimeRemaining, s_lastNP, timerActor->NextPhase,
-				timerActor->bPause ? "true" : "false");
-			s_hadSub    = (waveSub != nullptr);
-			s_lastNP    = timerActor->NextPhase;
-			s_lastPaused = timerActor->bPause;
+			LOG_DEBUG("ReadCurrentState: waveSub=%s nextTime=%.0f serverTime=%.0f remaining=%.1f waveNumber=%d→%d paused=%s ntValid=%s",
+				waveSub ? "FOUND" : "absent",
+				timerActor->NextTime, (float)serverTime,
+				nextTimeRemaining, s_lastNP, timerActor->NextPhase,
+				timerActor->bPause ? "true" : "false",
+				nextTimeValid ? "true" : "false");
+			s_hadSub      = (waveSub != nullptr);
+			s_lastNP      = timerActor->NextPhase;
+			s_lastPaused  = timerActor->bPause;
+			s_lastNTValid = nextTimeValid;
 		}
 	}
 
@@ -377,7 +399,7 @@ TimerState ReadCurrentState()
 		// It holds RepEnviroWaveTypeChange and RepEnviroWaveStageChange as persistent
 		// Net/RepNotify fields, giving us accurate phase and wave-type labels even
 		// when NextTime is stale.  Timing fields are left at -1 when nextTimeValid is false.
-		SDK::ACrGatherableSpawnersRepActor* repActor = FindGatherableSpawnersRepActor(world);
+		SDK::ACrGatherableSpawnersRepActor* repActor = s_objCache.repActor;
 		if (repActor)
 		{
 			state.diag.codePath    = "repActor";
