@@ -24,14 +24,15 @@ static SDK::UCrEnviroWaveSubsystem* FindEnviroWaveSubsystem(SDK::UWorld* /*world
 	SDK::TUObjectArray* arr = SDK::UObject::GObjects.GetTypedPtr();
 	if (!arr) return nullptr;
 
-	// The subsystem's outer chain does not include the UWorld pointer — both
-	// CrEnviroWaveSubsystem and CrGatherableSpawnersRepActor share a common
-	// outer that is NOT the world.  Search by class name only; there is exactly
-	// one instance in GObjects at any time.
+	// Skip the Class Default Object — it has all fields at zero and never
+	// updates.  GetDefaultObj() returns it directly so we can compare by pointer.
+	const SDK::UObject* cdo = SDK::UCrEnviroWaveSubsystem::GetDefaultObj();
+
 	for (int i = 0; i < arr->Num(); i++)
 	{
 		SDK::UObject* obj = arr->GetByIndex(i);
 		if (!obj || !obj->Class) continue;
+		if (obj == cdo) continue;
 		if (obj->Class->GetName() == "CrEnviroWaveSubsystem")
 			return static_cast<SDK::UCrEnviroWaveSubsystem*>(obj);
 	}
@@ -49,12 +50,13 @@ static SDK::ACrGatherableSpawnersRepActor* FindGatherableSpawnersRepActor(SDK::U
 	SDK::TUObjectArray* arr = SDK::UObject::GObjects.GetTypedPtr();
 	if (!arr) return nullptr;
 
-	// Same outer-chain situation as CrEnviroWaveSubsystem — the world pointer
-	// is not reachable from this object's outer chain.  Search by class name only.
+	const SDK::UObject* cdo = SDK::ACrGatherableSpawnersRepActor::GetDefaultObj();
+
 	for (int i = 0; i < arr->Num(); i++)
 	{
 		SDK::UObject* obj = arr->GetByIndex(i);
 		if (!obj || !obj->Class) continue;
+		if (obj == cdo) continue;
 		if (obj->Class->GetName() == "CrGatherableSpawnersRepActor")
 			return static_cast<SDK::ACrGatherableSpawnersRepActor*>(obj);
 	}
