@@ -81,4 +81,8 @@ namespace RuptureTimer
 
 	// Read current rupture timer state from the game. Call only from game thread.
 	TimerState ReadCurrentState();
+
+	// One-shot scan: logs all GObjects entries whose class name contains "Gatherable"
+	// or "RepActor". Call once after ExperienceLoadComplete to diagnose repActor discovery.
+	void ScanGatherableObjects();
 }

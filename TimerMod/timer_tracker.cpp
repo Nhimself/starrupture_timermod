@@ -721,4 +721,30 @@ TimerState ReadCurrentState()
 	return state;
 }
 
+void ScanGatherableObjects()
+{
+	static bool s_done = false;
+	if (s_done) return;
+	s_done = true;
+
+	SDK::TUObjectArray* arr = SDK::UObject::GObjects.GetTypedPtr();
+	if (!arr) { LOG_WARN("ScanGatherableObjects: GObjects unavailable"); return; }
+
+	int found = 0;
+	for (int i = 0; i < arr->Num(); i++)
+	{
+		SDK::UObject* obj = arr->GetByIndex(i);
+		if (!obj || !obj->Class) continue;
+		std::string name = obj->Class->GetName();
+		if (name.find("Gatherable") != std::string::npos ||
+		    name.find("RepActor")   != std::string::npos)
+		{
+			LOG_INFO("[RepActorScan] [%d] class=%s addr=%p", i, name.c_str(), (void*)obj);
+			++found;
+		}
+	}
+	if (found == 0)
+		LOG_INFO("[RepActorScan] No Gatherable/RepActor objects found in GObjects");
+}
+
 } // namespace RuptureTimer
