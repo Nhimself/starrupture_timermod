@@ -63,7 +63,6 @@ static void OnAnyWorldBeginPlay(SDK::UWorld* world, const char* worldName)
 static void OnExperienceLoadComplete()
 {
 	LOG_INFO("Experience load complete — reading initial rupture timer state");
-	RuptureTimer::ScanGatherableObjects();
 	s_lastState = RuptureTimer::ReadCurrentState();
 	if (s_lastState.valid)
 	{

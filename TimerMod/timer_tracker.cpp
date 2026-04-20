@@ -342,18 +342,22 @@ TimerState ReadCurrentState()
 	SDK::UCrEnviroWaveSubsystem* waveSub = FindEnviroWaveSubsystem(world);
 	state.diag.hasSubsystem = (waveSub != nullptr);
 
-	// Log only when something meaningful changes — nextPhase transition or subsystem presence flip.
+	// Log only when something meaningful changes — nextPhase transition, subsystem presence, or pause flag.
 	{
 		static bool     s_hadSub      = false;
 		static int32_t  s_lastNP      = -999;
-		bool subChanged = (waveSub != nullptr) != s_hadSub;
-		bool npChanged  = timerActor->NextPhase != s_lastNP;
-		if (subChanged || npChanged)
+		static bool     s_lastPaused  = false;
+		bool subChanged    = (waveSub != nullptr) != s_hadSub;
+		bool npChanged     = timerActor->NextPhase != s_lastNP;
+		bool pauseChanged  = timerActor->bPause != s_lastPaused;
+		if (subChanged || npChanged || pauseChanged)
 		{
-			LOG_DEBUG("ReadCurrentState: waveSub=%s nextTimeRemaining=%.1f waveNumber=%d→%d",
-				waveSub ? "FOUND" : "absent", nextTimeRemaining, s_lastNP, timerActor->NextPhase);
-			s_hadSub  = (waveSub != nullptr);
-			s_lastNP  = timerActor->NextPhase;
+			LOG_DEBUG("ReadCurrentState: waveSub=%s nextTimeRemaining=%.1f waveNumber=%d→%d paused=%s",
+				waveSub ? "FOUND" : "absent", nextTimeRemaining, s_lastNP, timerActor->NextPhase,
+				timerActor->bPause ? "true" : "false");
+			s_hadSub    = (waveSub != nullptr);
+			s_lastNP    = timerActor->NextPhase;
+			s_lastPaused = timerActor->bPause;
 		}
 	}
 
@@ -504,11 +508,15 @@ TimerState ReadCurrentState()
 			}
 			LOG_DEBUG_ONCE("ReadCurrentState: repActor absent — using client-side phase state machine");
 
+			// Pass -1.0f when NextTime hasn't been received yet (nextTimeValid=false)
+			// so the HUD shows unknown timing rather than a stuck 0s countdown.
+			// Phase is still determined correctly from NextPhase alone.
+			float smRemaining = nextTimeValid ? nextTimeRemaining : -1.0f;
 			UpdateClientPhaseStateMachine(
-				(float)serverTime, nextTimeRemaining,
+				(float)serverTime, smRemaining,
 				timerActor->NextPhase, world);
 
-			FillStateFromStateMachine(state, nextTimeRemaining);
+			FillStateFromStateMachine(state, smRemaining);
 		}
 		return state;
 	}
@@ -713,34 +721,6 @@ TimerState ReadCurrentState()
 	}
 
 	return state;
-}
-
-void ScanGatherableObjects()
-{
-	// Re-run once per world load so reconnects are covered.
-	static SDK::UWorld* s_scannedWorld = nullptr;
-	SDK::UWorld* world = SDK::UWorld::GetWorld();
-	if (world == s_scannedWorld) return;
-	s_scannedWorld = world;
-
-	SDK::TUObjectArray* arr = SDK::UObject::GObjects.GetTypedPtr();
-	if (!arr) { LOG_WARN("ScanGatherableObjects: GObjects unavailable"); return; }
-
-	int found = 0;
-	for (int i = 0; i < arr->Num(); i++)
-	{
-		SDK::UObject* obj = arr->GetByIndex(i);
-		if (!obj || !obj->Class) continue;
-		std::string name = obj->Class->GetName();
-		if (name.find("Gatherable") != std::string::npos ||
-		    name.find("RepActor")   != std::string::npos)
-		{
-			LOG_INFO("[RepActorScan] [%d] class=%s addr=%p", i, name.c_str(), (void*)obj);
-			++found;
-		}
-	}
-	if (found == 0)
-		LOG_INFO("[RepActorScan] No Gatherable/RepActor objects found in GObjects");
 }
 
 } // namespace RuptureTimer
