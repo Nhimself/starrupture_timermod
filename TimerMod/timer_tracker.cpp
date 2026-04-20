@@ -18,20 +18,82 @@ namespace RuptureTimer
 // Find UCrEnviroWaveSubsystem by iterating GObjects for the given world.
 // World subsystems are UObjects whose Outer is the UWorld instance.
 // ---------------------------------------------------------------------------
+// One-shot GObjects scan — logs every CrEnviro* and CrGatherable* object found,
+// showing its class name and up to three outer names.  Fires once per world to
+// help diagnose why FindEnviroWaveSubsystem / FindGatherableSpawnersRepActor
+// return null on a dedicated server.
+static void DiagnoseScanWaveObjects(SDK::UWorld* world)
+{
+	static SDK::UWorld* s_scannedWorld = nullptr;
+	if (s_scannedWorld == world) return;
+	s_scannedWorld = world;
+
+	SDK::TUObjectArray* arr = SDK::UObject::GObjects.GetTypedPtr();
+	if (!arr) { LOG_DEBUG("DiagnoseScan: GObjects null"); return; }
+
+	LOG_INFO("DiagnoseScan: scanning GObjects (%d entries) for wave-related classes", arr->Num());
+	int found = 0;
+	for (int i = 0; i < arr->Num(); i++)
+	{
+		SDK::UObject* obj = arr->GetByIndex(i);
+		if (!obj || !obj->Class) continue;
+
+		const std::string& cls = obj->Class->GetName();
+		if (cls.find("CrEnviro") == std::string::npos &&
+		    cls.find("CrGatherable") == std::string::npos &&
+		    cls.find("CrWaveTimer") == std::string::npos)
+			continue;
+
+		SDK::UObject* o1 = obj->Outer;
+		SDK::UObject* o2 = o1 ? o1->Outer : nullptr;
+		SDK::UObject* o3 = o2 ? o2->Outer : nullptr;
+
+		const char* n1 = (o1 && o1->Class) ? o1->Class->GetName().c_str() : "null";
+		const char* n2 = (o2 && o2->Class) ? o2->Class->GetName().c_str() : "null";
+		const char* n3 = (o3 && o3->Class) ? o3->Class->GetName().c_str() : "null";
+
+		bool matchesWorld = (o1 == (SDK::UObject*)world ||
+		                     o2 == (SDK::UObject*)world ||
+		                     o3 == (SDK::UObject*)world);
+
+		LOG_INFO("DiagnoseScan:  [%s] outer1=%s outer2=%s outer3=%s worldMatch=%s",
+			cls.c_str(), n1, n2, n3, matchesWorld ? "YES" : "NO");
+		++found;
+	}
+	LOG_INFO("DiagnoseScan: done — %d wave-related objects found", found);
+}
+
 static SDK::UCrEnviroWaveSubsystem* FindEnviroWaveSubsystem(SDK::UWorld* world)
 {
 	SDK::TUObjectArray* arr = SDK::UObject::GObjects.GetTypedPtr();
 	if (!arr) return nullptr;
 
+	SDK::UCrEnviroWaveSubsystem* found = nullptr;
 	for (int i = 0; i < arr->Num(); i++)
 	{
 		SDK::UObject* obj = arr->GetByIndex(i);
 		if (!obj || !obj->Class || !obj->Outer) continue;
-		if (obj->Outer != static_cast<SDK::UObject*>(world)) continue;
-		if (obj->Class->GetName() == "CrEnviroWaveSubsystem")
-			return static_cast<SDK::UCrEnviroWaveSubsystem*>(obj);
+		if (obj->Class->GetName() != "CrEnviroWaveSubsystem") continue;
+
+		// World subsystems normally have Outer == UWorld directly.
+		// Accept one extra level in case of server-side layout differences.
+		SDK::UObject* o1 = obj->Outer;
+		SDK::UObject* o2 = o1 ? o1->Outer : nullptr;
+		if (o1 == static_cast<SDK::UObject*>(world) ||
+		    o2 == static_cast<SDK::UObject*>(world))
+		{
+			found = static_cast<SDK::UCrEnviroWaveSubsystem*>(obj);
+			break;
+		}
+
+		LOG_DEBUG_ONCE("FindEnviroWaveSubsystem: found class but outer chain mismatch — "
+			"obj=%p o1=%p o2=%p world=%p",
+			static_cast<void*>(obj),
+			static_cast<void*>(o1),
+			static_cast<void*>(o2),
+			static_cast<void*>(world));
 	}
-	return nullptr;
+	return found;
 }
 
 // ---------------------------------------------------------------------------
@@ -48,15 +110,39 @@ static SDK::ACrGatherableSpawnersRepActor* FindGatherableSpawnersRepActor(SDK::U
 	// ACrGatherableSpawnersRepActor is an AActor — Outer chain is:
 	//   actor → ULevel → UWorld
 	// So we must check two levels up, not one.
+	//
+	// On a dedicated server the level structure may differ, so we also accept
+	// a match where the object is anywhere in the world's outer hierarchy —
+	// walk up to three levels to catch sublevel variations.
+	SDK::ACrGatherableSpawnersRepActor* found = nullptr;
 	for (int i = 0; i < arr->Num(); i++)
 	{
 		SDK::UObject* obj = arr->GetByIndex(i);
-		if (!obj || !obj->Class) continue;
-		if (!obj->Outer || obj->Outer->Outer != static_cast<SDK::UObject*>(world)) continue;
-		if (obj->Class->GetName() == "CrGatherableSpawnersRepActor")
-			return static_cast<SDK::ACrGatherableSpawnersRepActor*>(obj);
+		if (!obj || !obj->Class || !obj->Outer) continue;
+		if (obj->Class->GetName() != "CrGatherableSpawnersRepActor") continue;
+
+		// Check up to three levels of Outer for the world pointer.
+		SDK::UObject* o1 = obj->Outer;
+		SDK::UObject* o2 = o1 ? o1->Outer : nullptr;
+		SDK::UObject* o3 = o2 ? o2->Outer : nullptr;
+		if (o1 == static_cast<SDK::UObject*>(world) ||
+		    o2 == static_cast<SDK::UObject*>(world) ||
+		    o3 == static_cast<SDK::UObject*>(world))
+		{
+			found = static_cast<SDK::ACrGatherableSpawnersRepActor*>(obj);
+			break;
+		}
+
+		// Log any repActor that doesn't match the expected outer chain so we
+		// can diagnose server-side layout differences.
+		LOG_DEBUG_ONCE("FindGatherableSpawnersRepActor: found class but outer chain mismatch — "
+			"obj=%p o1=%p o2=%p world=%p",
+			static_cast<void*>(obj),
+			static_cast<void*>(o1),
+			static_cast<void*>(o2),
+			static_cast<void*>(world));
 	}
-	return nullptr;
+	return found;
 }
 
 // ---------------------------------------------------------------------------
@@ -335,6 +421,7 @@ TimerState ReadCurrentState()
 	// local/listen-server (subsystem present) or dedicated-server client before
 	// deciding which path to take.  Subsystem lookup is O(GObjects) so it runs
 	// once per tick; the early-out paths below avoid redundant work.
+	DiagnoseScanWaveObjects(world);
 	SDK::UCrEnviroWaveSubsystem* waveSub = FindEnviroWaveSubsystem(world);
 	state.diag.hasSubsystem = (waveSub != nullptr);
 
