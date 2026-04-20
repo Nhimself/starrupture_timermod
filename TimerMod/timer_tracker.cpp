@@ -486,11 +486,13 @@ TimerState ReadCurrentState()
 					break;
 			}
 		}
-		else if (nextTimeValid)
+		else
 		{
-			// Last-resort fallback: no subsystem, no rep actor, but NextTime is
-			// plausible.  NextPhase directly encodes the current interval (0=Stable,
-			// 1=Warning, 2=Burning, 3=post-wave); nextTimeRemaining = time remaining.
+			// Last-resort fallback: no subsystem, no rep actor.
+			// NextPhase directly encodes the current interval (0=Stable, 1=Warning,
+			// 2=Burning, 3=post-wave). Use it even when NextTime hasn't been received
+			// yet (NextTime==0 gives rawUnclamped = -serverTime, very negative) —
+			// nextTimeRemaining is already clamped to 0 in that case.
 			state.diag.codePath = "stateMachine";
 			switch (timerActor->NextPhase)
 			{
@@ -507,14 +509,6 @@ TimerState ReadCurrentState()
 				timerActor->NextPhase, world);
 
 			FillStateFromStateMachine(state, nextTimeRemaining);
-		}
-		else
-		{
-			// No subsystem, no repActor, and NextTime is too stale for stateMachine.
-			// The plugin on this client has nothing to work with yet.
-			state.diag.codePath = "none";
-			state.phase     = RupturePhase::Unknown;
-			state.phaseName = "Waiting";
 		}
 		return state;
 	}
@@ -723,9 +717,11 @@ TimerState ReadCurrentState()
 
 void ScanGatherableObjects()
 {
-	static bool s_done = false;
-	if (s_done) return;
-	s_done = true;
+	// Re-run once per world load so reconnects are covered.
+	static SDK::UWorld* s_scannedWorld = nullptr;
+	SDK::UWorld* world = SDK::UWorld::GetWorld();
+	if (world == s_scannedWorld) return;
+	s_scannedWorld = world;
 
 	SDK::TUObjectArray* arr = SDK::UObject::GObjects.GetTypedPtr();
 	if (!arr) { LOG_WARN("ScanGatherableObjects: GObjects unavailable"); return; }
