@@ -109,21 +109,25 @@
     <TargetExt>.dll</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Client Debug|x64'">
+    <TargetName>TimerMod</TargetName>
     <OutDir>$(SolutionDir)bin\$(Platform)\$(Configuration)\plugins\</OutDir>
     <IntDir>$(SolutionDir)obj\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir>
     <TargetExt>.dll</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Client Release|x64'">
+    <TargetName>TimerMod</TargetName>
     <OutDir>$(SolutionDir)bin\$(Platform)\$(Configuration)\plugins\</OutDir>
     <IntDir>$(SolutionDir)obj\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir>
     <TargetExt>.dll</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Server Debug|x64'">
+    <TargetName>TimerMod-Server</TargetName>
     <OutDir>$(SolutionDir)bin\$(Platform)\$(Configuration)\plugins\</OutDir>
     <IntDir>$(SolutionDir)obj\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir>
     <TargetExt>.dll</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Server Release|x64'">
+    <TargetName>TimerMod-Server</TargetName>
     <OutDir>$(SolutionDir)bin\$(Platform)\$(Configuration)\plugins\</OutDir>
     <IntDir>$(SolutionDir)obj\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir>
     <TargetExt>.dll</TargetExt>
@@ -250,6 +254,7 @@
     <ClInclude Include="plugin_config.h" />
     <ClInclude Include="plugin_helpers.h" />
     <ClInclude Include="timer_tracker.h" />
+    <ClInclude Include="wave_packet.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="$(StarRuptureSDKSourceDir)Basic.cpp">
@@ -264,12 +269,25 @@
     <ClCompile Include="$(StarRuptureSDKSourceDir)Chimera_functions.cpp">
       <Visible>false</Visible>
     </ClCompile>
-    <ClCompile Include="data_export.cpp" />
+    <ClCompile Include="data_export.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)'=='Server Debug' Or '$(Configuration)'=='Server Release'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="dllmain.cpp" />
-    <ClCompile Include="hud_overlay.cpp" />
-    <ClCompile Include="plugin.cpp" />
-    <ClCompile Include="plugin_config.cpp" />
-    <ClCompile Include="timer_tracker.cpp" />
+    <ClCompile Include="hud_overlay.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)'=='Server Debug' Or '$(Configuration)'=='Server Release'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="plugin.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)'=='Server Debug' Or '$(Configuration)'=='Server Release'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="plugin_config.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)'=='Server Debug' Or '$(Configuration)'=='Server Release'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="timer_tracker.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)'=='Server Debug' Or '$(Configuration)'=='Server Release'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="server_plugin.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)'!='Server Debug' And '$(Configuration)'!='Server Release'">true</ExcludedFromBuild>
+    </ClCompile>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

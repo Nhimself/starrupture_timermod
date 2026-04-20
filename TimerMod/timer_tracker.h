@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include "wave_packet.h"
 
 namespace RuptureTimer
 {
@@ -81,4 +82,9 @@ namespace RuptureTimer
 
 	// Read current rupture timer state from the game. Call only from game thread.
 	TimerState ReadCurrentState();
+
+	// Store a network-replicated wave state received from the server-side plugin.
+	// Must be called from the game thread. ReadCurrentState() will use this as a
+	// fallback when UCrEnviroWaveSubsystem and ACrGatherableSpawnersRepActor are absent.
+	void SetNetworkState(const WaveStatePacket& pkt);
 }

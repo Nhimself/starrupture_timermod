@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <cstdint>
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include "Basic.hpp"
@@ -13,6 +14,26 @@
 
 namespace RuptureTimer
 {
+
+// ---------------------------------------------------------------------------
+// Network state cache — populated by SetNetworkState() when a server-side
+// RuptureTimerServer plugin is present and broadcasting WaveStatePackets.
+// Used as a fallback when UCrEnviroWaveSubsystem and repActor are both absent.
+// ---------------------------------------------------------------------------
+struct NetworkStateCache
+{
+	WaveStatePacket pkt;
+	ULONGLONG       receivedTick = 0;   // GetTickCount64() at receive time
+	bool            hasData      = false;
+};
+static NetworkStateCache s_netCache;
+
+void SetNetworkState(const WaveStatePacket& pkt)
+{
+	s_netCache.pkt          = pkt;
+	s_netCache.receivedTick = GetTickCount64();
+	s_netCache.hasData      = true;
+}
 
 // ---------------------------------------------------------------------------
 // Cached GObjects scan — avoids O(n) iteration every tick.
@@ -512,9 +533,55 @@ TimerState ReadCurrentState()
 					break;
 			}
 		}
+		else if (s_netCache.hasData &&
+		         (GetTickCount64() - s_netCache.receivedTick < 15000ULL))
+		{
+			// Network path: state was broadcast by the server-side RuptureTimerServer plugin.
+			// Active when server modloader is running and direct replication is broken.
+			state.diag.codePath = "network";
+			const WaveStatePacket& np = s_netCache.pkt;
+
+			state.phase = static_cast<RupturePhase>(np.phase);
+			switch (state.phase) {
+				case RupturePhase::Stable:      state.phaseName = "Stable";      break;
+				case RupturePhase::Warning:     state.phaseName = "Warning";     break;
+				case RupturePhase::Burning:     state.phaseName = "Burning";     break;
+				case RupturePhase::Cooling:     state.phaseName = "Cooling";     break;
+				case RupturePhase::Stabilizing: state.phaseName = "Stabilizing"; break;
+				default:
+					state.phase     = RupturePhase::Unknown;
+					state.phaseName = "Unknown";
+					break;
+			}
+
+			state.waveType = np.waveType;
+			switch (np.waveType) {
+				case 1: state.waveTypeName = "Heat"; break;
+				case 2: state.waveTypeName = "Cold"; break;
+				default: state.waveTypeName = "None"; break;
+			}
+
+			state.phaseRemainingSeconds = np.phaseRemaining;
+			state.nextRuptureInSeconds  = np.nextRuptureIn;
+			state.waveNumber            = np.waveNumber;
+
+			state.diag.rawFadeoutSubstage  = np.fadeoutSub;
+			state.diag.rawGrowbackSubstage = np.growbackSub;
+			state.diag.rawPreWaveSubstage  = np.preWaveSub;
+
+			{
+				static uint8_t s_lastNetPhase = 0xFF;
+				if (np.phase != s_lastNetPhase)
+				{
+					LOG_INFO("[WaveState/network] phase=%s(%u) waveType=%u waveNumber=%d nextRuptureIn=%.1f",
+						state.phaseName, np.phase, np.waveType, np.waveNumber, np.nextRuptureIn);
+					s_lastNetPhase = np.phase;
+				}
+			}
+		}
 		else
 		{
-			// Last-resort fallback: no subsystem, no rep actor.
+			// Last-resort fallback: no subsystem, no rep actor, no network state.
 			// NextPhase directly encodes the current interval (0=Stable, 1=Warning,
 			// 2=Burning, 3=post-wave). Use it even when NextTime hasn't been received
 			// yet (NextTime==0 gives rawUnclamped = -serverTime, very negative) —
