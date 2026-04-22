@@ -20,3 +20,4 @@ inline IPluginScanner* GetScanner() { auto* s = GetSelf(); return s ? s->scanner
 // Log once per process lifetime (uses a local static bool)
 #define LOG_INFO_ONCE(format, ...) do { static bool _logged = false; if (!_logged) { _logged = true; LOG_INFO(format, ##__VA_ARGS__); } } while(0)
 #define LOG_WARN_ONCE(format, ...) do { static bool _logged = false; if (!_logged) { _logged = true; LOG_WARN(format, ##__VA_ARGS__); } } while(0)
+#define LOG_DEBUG_ONCE(format, ...) do { static bool _logged = false; if (!_logged) { _logged = true; LOG_DEBUG(format, ##__VA_ARGS__); } } while(0)

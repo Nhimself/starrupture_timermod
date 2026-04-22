@@ -2,9 +2,11 @@
 #include "plugin_helpers.h"
 #include "plugin_config.h"
 #include "timer_tracker.h"
+#include "wave_packet.h"
 #include "data_export.h"
 #include "hud_overlay.h"
 
+#include <cstring>
 #include "Engine_classes.hpp"
 
 // ---------------------------------------------------------------------------
@@ -79,6 +81,15 @@ static void OnExperienceLoadComplete()
 	}
 }
 
+static void OnNetworkWaveState(const char* /*pluginName*/, const char* /*typeTag*/,
+                               const uint8_t* data, size_t size)
+{
+	if (size < sizeof(WaveStatePacket)) return;
+	WaveStatePacket pkt;
+	memcpy(&pkt, data, sizeof(pkt));
+	RuptureTimer::SetNetworkState(pkt);
+}
+
 static void OnEngineTick(float deltaSeconds)
 {
 	if (!s_worldReady) return;
@@ -143,6 +154,12 @@ __declspec(dllexport) bool PluginInit(IPluginSelf* self)
 		LOG_DEBUG("Registered OnEngineTick");
 	}
 
+	if (hooks->Network && !hooks->Network->IsServer())
+	{
+		hooks->Network->RegisterMessageHandler(self, WAVE_STATE_TYPE_TAG, OnNetworkWaveState);
+		LOG_DEBUG("Registered network wave state handler");
+	}
+
 	if (RuptureTimerConfig::Config::ShouldShowOverlay())
 	{
 		if (!HudOverlay::Install(hooks))
@@ -184,6 +201,9 @@ __declspec(dllexport) void PluginShutdown()
 		auto* hooks = g_self->hooks;
 
 		HudOverlay::Remove(hooks);
+
+		if (hooks->Network && !hooks->Network->IsServer())
+			hooks->Network->UnregisterMessageHandler(g_self, WAVE_STATE_TYPE_TAG, OnNetworkWaveState);
 
 		if (hooks->World)
 		{

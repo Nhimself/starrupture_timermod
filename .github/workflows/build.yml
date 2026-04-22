@@ -13,7 +13,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           submodules: recursive
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -29,8 +29,22 @@ jobs:
             /m `
             /v:minimal
 
+      - name: Build Server Release
+        run: |
+          msbuild "StarRupture-TimerMod.sln" `
+            /p:Configuration="Server Release" `
+            /p:Platform=x64 `
+            /m `
+            /v:minimal
+
       - name: Upload Client DLL
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: TimerMod-Client
           path: bin/x64/Client Release/plugins/TimerMod.dll
+
+      - name: Upload Server DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: TimerMod-Server
+          path: bin/x64/Server Release/plugins/TimerMod-Server.dll

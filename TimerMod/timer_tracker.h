@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include "wave_packet.h"
 
 namespace RuptureTimer
 {
@@ -41,6 +42,16 @@ namespace RuptureTimer
 		//   subsystem/repActor: EEnviroWaveStage name ("None","PreWave","Moving","Fadeout","Growback")
 		//   stateMachine:       NextPhase label       ("NP0=Stable","NP1=PreWave","NP2=Moving","NP3=PostWave")
 		const char*  rawPhaseName;
+
+		// Substage fields — populated by the subsystem path only.
+		// Allow us to see what the game internally calls each sub-step of
+		// Fadeout (FireWave/Burning/Fading), Growback (MoonPhase/RegrowthStart/Regrowth),
+		// and PreWave (BeforeExplosion/AfterExplosion).
+		// -1 means the stage is not active or the subsystem is absent.
+		int          rawFadeoutSubstage;    // EEnviroWaveFadeoutSubstage as int (-1 if not applicable)
+		int          rawGrowbackSubstage;   // EEnviroWaveGrowbackSubstage as int (-1 if not applicable)
+		int          rawPreWaveSubstage;    // EEnviroWavePreWaveSubstage as int (-1 if not applicable)
+		const char*  rawSubstageName;       // human-readable name of the active substage (or "None")
 	};
 
 	struct TimerState
@@ -71,4 +82,9 @@ namespace RuptureTimer
 
 	// Read current rupture timer state from the game. Call only from game thread.
 	TimerState ReadCurrentState();
+
+	// Store a network-replicated wave state received from the server-side plugin.
+	// Must be called from the game thread. ReadCurrentState() will use this as a
+	// fallback when UCrEnviroWaveSubsystem and ACrGatherableSpawnersRepActor are absent.
+	void SetNetworkState(const WaveStatePacket& pkt);
 }
