@@ -71,7 +71,7 @@ static SDK::UCrEnviroWaveSubsystem* FindSubsystem(SDK::UWorld* world)
 }
 
 // ---------------------------------------------------------------------------
-// Phase duration from game settings — mirrors the client's StageDurationFromSettings.
+// Phase duration from game settings (subsystem path only).
 // ---------------------------------------------------------------------------
 static float StageDuration(SDK::EEnviroWaveStage stage, const SDK::FCrEnviroWaveSettings& s)
 {
@@ -81,8 +81,7 @@ static float StageDuration(SDK::EEnviroWaveStage stage, const SDK::FCrEnviroWave
 			return s.PreWaveDuration + s.WavePreWaveExplosionDuration;
 		case SDK::EEnviroWaveStage::Moving:
 			return (s.WaveSpeed > 0.0f)
-				? fabsf(s.WaveEndPosition - s.WaveStartPosition) / s.WaveSpeed
-				: 0.0f;
+				? fabsf(s.WaveEndPosition - s.WaveStartPosition) / s.WaveSpeed : 0.0f;
 		case SDK::EEnviroWaveStage::Fadeout:
 			return s.WaveFadeoutFireWaveDuration + s.WaveFadeoutBurningDuration + s.WaveFadeoutFadingDuration;
 		case SDK::EEnviroWaveStage::Growback:
@@ -105,98 +104,13 @@ struct BroadcastSnapshot
 	int32_t  waveNumber  = -1;
 };
 static BroadcastSnapshot s_last;
-static float s_heartbeatAccum = 0.0f;
-static bool  s_worldReady     = false;
+static float s_heartbeatAccum    = 0.0f;
+static bool  s_worldReady        = false;
 static constexpr float HEARTBEAT = 5.0f;
 
-// ---------------------------------------------------------------------------
-// Pack and broadcast the current state to all connected clients.
-// ---------------------------------------------------------------------------
-static void Broadcast(SDK::UCrEnviroWaveSubsystem* sub,
-                      SDK::ACrWaveTimerActor*      timer,
-                      double                        serverTime)
-{
-	auto* net = (g_self && g_self->hooks) ? g_self->hooks->Network : nullptr;
-	if (!net) return;
-
-	SDK::EEnviroWaveStage stage    = sub->GetCurrentStage();
-	SDK::EEnviroWave      waveType = sub->GetCurrentType();
-
-	uint8_t phase;
-	switch (stage) {
-		case SDK::EEnviroWaveStage::None:     phase = 1; break;
-		case SDK::EEnviroWaveStage::PreWave:  phase = 2; break;
-		case SDK::EEnviroWaveStage::Moving:   phase = 3; break;
-		case SDK::EEnviroWaveStage::Fadeout:  phase = 4; break;
-		case SDK::EEnviroWaveStage::Growback: phase = 5; break;
-		default:                              phase = 0; break;
-	}
-
-	int8_t fadeoutSub  = (stage == SDK::EEnviroWaveStage::Fadeout)
-		? static_cast<int8_t>(sub->CurrentFadeoutSubstage)  : int8_t(-1);
-	int8_t growbackSub = (stage == SDK::EEnviroWaveStage::Growback)
-		? static_cast<int8_t>(sub->CurrentGrowbackSubstage) : int8_t(-1);
-	int8_t preWaveSub  = (stage == SDK::EEnviroWaveStage::PreWave)
-		? static_cast<int8_t>(sub->CurrentPreWaveSubstage)  : int8_t(-1);
-
-	float nextRuptureIn  = -1.0f;
-	float phaseRemaining = -1.0f;
-
-	if (timer)
-	{
-		float ntRaw       = timer->NextTime - static_cast<float>(serverTime);
-		bool  ntValid     = (ntRaw >= -60.0f);
-		float ntRemaining = (ntValid && ntRaw > 0.0f) ? ntRaw : (ntValid ? 0.0f : -1.0f);
-
-		switch (stage) {
-			case SDK::EEnviroWaveStage::None:
-				phaseRemaining = ntRemaining;
-				nextRuptureIn  = ntRemaining;
-				break;
-			case SDK::EEnviroWaveStage::Moving:
-				nextRuptureIn = 0.0f;
-				break;
-			default:
-				nextRuptureIn = ntRemaining;
-				break;
-		}
-
-		if (stage != SDK::EEnviroWaveStage::None)
-		{
-			float progress = sub->GetCurrentStageProgress();
-			if (progress >= 0.0f && progress <= 1.0f)
-			{
-				SDK::FCrEnviroWaveSettings settings = sub->GetCurrentStageSettings();
-				float dur = StageDuration(stage, settings);
-				phaseRemaining = dur * (1.0f - progress);
-				if (phaseRemaining < 0.0f) phaseRemaining = 0.0f;
-			}
-		}
-	}
-
-	WaveStatePacket pkt{};
-	pkt.phase          = phase;
-	pkt.waveType       = static_cast<uint8_t>(waveType);
-	pkt.fadeoutSub     = fadeoutSub;
-	pkt.growbackSub    = growbackSub;
-	pkt.preWaveSub     = preWaveSub;
-	pkt.phaseRemaining = phaseRemaining;
-	pkt.nextRuptureIn  = nextRuptureIn;
-	pkt.waveNumber     = timer ? timer->NextPhase : 0;
-
-	net->SendPacketToAllClients(g_self, WAVE_STATE_TYPE_TAG,
-		reinterpret_cast<const uint8_t*>(&pkt), sizeof(pkt));
-
-	s_last.phase       = phase;
-	s_last.waveType    = pkt.waveType;
-	s_last.fadeoutSub  = fadeoutSub;
-	s_last.growbackSub = growbackSub;
-	s_last.preWaveSub  = preWaveSub;
-	s_last.waveNumber  = pkt.waveNumber;
-
-	LOG_DEBUG("Broadcast: phase=%u type=%u wave#=%d nextIn=%.1f phaseRem=%.1f",
-		phase, pkt.waveType, pkt.waveNumber, nextRuptureIn, phaseRemaining);
-}
+// Canonical post-wave split: first 60s = Cooling, remaining 600s = Stabilizing.
+// Matches the client-side stateMachine constants used when no anchor is observed.
+static constexpr float STABILIZING_DURATION = 600.0f;
 
 // ---------------------------------------------------------------------------
 // Callbacks
@@ -228,43 +142,103 @@ static void OnEngineTick(float deltaSeconds)
 	auto* gs = static_cast<SDK::ACrGameStateBase*>(world->GameState);
 	if (!gs || !gs->WaveTimerActor) return;
 
-	SDK::UCrEnviroWaveSubsystem* sub = FindSubsystem(world);
-	if (!sub) return;
-
 	SDK::ACrWaveTimerActor* timer      = gs->WaveTimerActor;
 	double                  serverTime = gs->GetServerWorldTimeSeconds();
 
-	SDK::EEnviroWaveStage stage    = sub->GetCurrentStage();
-	SDK::EEnviroWave      waveType = sub->GetCurrentType();
+	// Primary source: WaveTimerActor — always valid on server, loaded from save.
+	// NextTime is an absolute server timestamp; the server's own clock is exact.
+	int32_t nextPhase    = timer->NextPhase;
+	float   ntRaw        = timer->NextTime - static_cast<float>(serverTime);
+	float   ntRemaining  = (ntRaw < 0.0f) ? 0.0f : ntRaw;
 
+	// Derive RupturePhase from NextPhase (same mapping as client stateMachine):
+	//   0=Stable  1=Warning  2=Burning  3=PostWave(Cooling+Stabilizing combined)
+	// For nextPhase==3, split on time remaining vs the Stabilizing boundary.
 	uint8_t phase;
-	switch (stage) {
-		case SDK::EEnviroWaveStage::None:     phase = 1; break;
-		case SDK::EEnviroWaveStage::PreWave:  phase = 2; break;
-		case SDK::EEnviroWaveStage::Moving:   phase = 3; break;
-		case SDK::EEnviroWaveStage::Fadeout:  phase = 4; break;
-		case SDK::EEnviroWaveStage::Growback: phase = 5; break;
-		default:                              phase = 0; break;
+	switch (nextPhase) {
+		case 0:  phase = 1; break;
+		case 1:  phase = 2; break;
+		case 2:  phase = 3; break;
+		case 3:  phase = (ntRemaining > STABILIZING_DURATION) ? 4 : 5; break;
+		default: phase = 0; break;
 	}
-	int8_t  fadeoutSub  = (stage == SDK::EEnviroWaveStage::Fadeout)
-		? static_cast<int8_t>(sub->CurrentFadeoutSubstage)  : int8_t(-1);
-	int8_t  growbackSub = (stage == SDK::EEnviroWaveStage::Growback)
-		? static_cast<int8_t>(sub->CurrentGrowbackSubstage) : int8_t(-1);
-	int8_t  preWaveSub  = (stage == SDK::EEnviroWaveStage::PreWave)
-		? static_cast<int8_t>(sub->CurrentPreWaveSubstage)  : int8_t(-1);
-	uint8_t wt         = static_cast<uint8_t>(waveType);
-	int32_t waveNumber = timer->NextPhase;
+
+	float nextRuptureIn  = (phase == 3) ? 0.0f : ntRemaining;
+	float phaseRemaining = (phase == 1 || phase == 2) ? ntRemaining : -1.0f;
+
+	// Optional enrichment: subsystem provides wave type, substages, and precise
+	// phaseRemaining. Subsystem absence no longer blocks broadcasts.
+	uint8_t wt         = 0;
+	int8_t  fadeoutSub = -1, growbackSub = -1, preWaveSub = -1;
+
+	SDK::UCrEnviroWaveSubsystem* sub = FindSubsystem(world);
+	if (sub)
+	{
+		SDK::EEnviroWave      waveType = sub->GetCurrentType();
+		SDK::EEnviroWaveStage stage    = sub->GetCurrentStage();
+		wt = static_cast<uint8_t>(waveType);
+
+		fadeoutSub  = (stage == SDK::EEnviroWaveStage::Fadeout)
+			? static_cast<int8_t>(sub->CurrentFadeoutSubstage)  : int8_t(-1);
+		growbackSub = (stage == SDK::EEnviroWaveStage::Growback)
+			? static_cast<int8_t>(sub->CurrentGrowbackSubstage) : int8_t(-1);
+		preWaveSub  = (stage == SDK::EEnviroWaveStage::PreWave)
+			? static_cast<int8_t>(sub->CurrentPreWaveSubstage)  : int8_t(-1);
+
+		if (stage != SDK::EEnviroWaveStage::None)
+		{
+			float progress = sub->GetCurrentStageProgress();
+			if (progress >= 0.0f && progress <= 1.0f)
+			{
+				SDK::FCrEnviroWaveSettings settings = sub->GetCurrentStageSettings();
+				float dur = StageDuration(stage, settings);
+				phaseRemaining = dur * (1.0f - progress);
+				if (phaseRemaining < 0.0f) phaseRemaining = 0.0f;
+			}
+		}
+		else
+		{
+			phaseRemaining = ntRemaining;
+		}
+	}
 
 	bool changed = (phase != s_last.phase || wt != s_last.waveType ||
 	                fadeoutSub != s_last.fadeoutSub || growbackSub != s_last.growbackSub ||
-	                preWaveSub != s_last.preWaveSub || waveNumber != s_last.waveNumber);
+	                preWaveSub != s_last.preWaveSub || nextPhase != s_last.waveNumber);
 
 	s_heartbeatAccum += deltaSeconds;
 	bool heartbeat = (s_heartbeatAccum >= HEARTBEAT);
 	if (heartbeat) s_heartbeatAccum = 0.0f;
 
 	if (changed || heartbeat)
-		Broadcast(sub, timer, serverTime);
+	{
+		auto* net = (g_self && g_self->hooks) ? g_self->hooks->Network : nullptr;
+		if (net)
+		{
+			WaveStatePacket pkt{};
+			pkt.phase          = phase;
+			pkt.waveType       = wt;
+			pkt.fadeoutSub     = fadeoutSub;
+			pkt.growbackSub    = growbackSub;
+			pkt.preWaveSub     = preWaveSub;
+			pkt.phaseRemaining = phaseRemaining;
+			pkt.nextRuptureIn  = nextRuptureIn;
+			pkt.waveNumber     = nextPhase;
+
+			net->SendPacketToAllClients(g_self, WAVE_STATE_TYPE_TAG,
+				reinterpret_cast<const uint8_t*>(&pkt), sizeof(pkt));
+
+			LOG_DEBUG("Broadcast: phase=%u type=%u wave#=%d ntRem=%.1f sub=%s",
+				phase, wt, nextPhase, ntRemaining, sub ? "yes" : "no");
+		}
+
+		s_last.phase       = phase;
+		s_last.waveType    = wt;
+		s_last.fadeoutSub  = fadeoutSub;
+		s_last.growbackSub = growbackSub;
+		s_last.preWaveSub  = preWaveSub;
+		s_last.waveNumber  = nextPhase;
+	}
 }
 
 // ---------------------------------------------------------------------------
