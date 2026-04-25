@@ -8,8 +8,9 @@ name: Check for SDK update
 #                     from its own release workflow using a PAT/fine-grained
 #                     token that has repo access here)
 #
-# When a new SDK release is found, a PR is opened against main.
-# You decide when to merge — once merged, push a v* tag to trigger a release build.
+# When a new SDK version is found, a PR is opened against main.
+# You decide when to merge — once merged, the VERSION bump triggers auto-tag.yml
+# which pushes a v* tag and kicks off a release build.
 on:
   schedule:
     - cron: '0 6 * * 1'    # 06:00 UTC every Monday
@@ -42,29 +43,37 @@ jobs:
 
           # Determine the tag to target:
           # - repository_dispatch may supply it in client_payload.tag
-          # - otherwise query the latest release from the SDK repo
+          # - otherwise query the SDK repo: try releases/latest first,
+          #   then fall back to the tags list (SDK may not use GitHub Releases)
           DISPATCH_TAG="${{ github.event.client_payload.tag }}"
           if [ -n "$DISPATCH_TAG" ]; then
             LATEST_TAG="$DISPATCH_TAG"
             echo "Using tag from dispatch payload: $LATEST_TAG"
           else
-            LATEST_TAG=$(gh api repos/AlienXAXS/StarRupture-Game-SDK/releases/latest \
-              --jq '.tag_name' 2>/dev/null || echo "")
+            _rel=$(gh api repos/AlienXAXS/StarRupture-Game-SDK/releases/latest 2>/dev/null) || _rel=""
+            LATEST_TAG=$(printf '%s' "$_rel" | jq -r '.tag_name // empty' 2>/dev/null || echo "")
+
             if [ -z "$LATEST_TAG" ]; then
-              echo "No releases found in SDK repo — nothing to do."
+              echo "No GitHub Release found — checking tags..."
+              _tags=$(gh api "repos/AlienXAXS/StarRupture-Game-SDK/tags?per_page=1" 2>/dev/null) || _tags=""
+              LATEST_TAG=$(printf '%s' "$_tags" | jq -r '.[0].name // empty' 2>/dev/null || echo "")
+            fi
+
+            if [ -z "$LATEST_TAG" ]; then
+              echo "No releases or tags found in SDK repo — nothing to do."
               echo "updated=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            echo "Latest SDK release: $LATEST_TAG"
+            echo "Latest SDK version: $LATEST_TAG"
           fi
 
-          # Resolve the commit SHA the release tag points to
-          RELEASE_SHA=$(gh api "repos/AlienXAXS/StarRupture-Game-SDK/commits/$LATEST_TAG" \
-            --jq '.sha' 2>/dev/null || echo "")
+          # Resolve the commit SHA the tag points to
+          _commit=$(gh api "repos/AlienXAXS/StarRupture-Game-SDK/commits/$LATEST_TAG" 2>/dev/null) || _commit=""
+          RELEASE_SHA=$(printf '%s' "$_commit" | jq -r '.sha // empty' 2>/dev/null || echo "")
 
           CURRENT_SHA=$(git -C "StarRupture SDK" rev-parse HEAD)
           echo "Current submodule SHA : $CURRENT_SHA"
-          echo "Latest release SHA    : ${RELEASE_SHA:-<could not resolve>}"
+          echo "Latest SDK SHA        : ${RELEASE_SHA:-<could not resolve>}"
 
           if [ -z "$RELEASE_SHA" ]; then
             echo "Could not resolve commit for tag $LATEST_TAG — skipping."
@@ -95,15 +104,21 @@ jobs:
           git -C "StarRupture SDK" checkout "$LATEST_TAG"
           git add "StarRupture SDK"
 
-          # Check if the SDK release includes an updated plugin_interface.h.
-          # If PLUGIN_INTERFACE_VERSION_MAX changed, update our copy and bump VERSION.
-          VERSION_BUMP_MSG=""
-          gh release download "$LATEST_TAG" \
-            --repo AlienXAXS/StarRupture-Game-SDK \
-            --pattern "plugin_interface.h" \
-            --dir /tmp \
-            --clobber 2>/dev/null && FOUND_PI=true || FOUND_PI=false
+          # Check if plugin_interface.h changed with this SDK version.
+          # Try release asset first, then fall back to the submodule tree.
+          FOUND_PI=false
+          if gh release download "$LATEST_TAG" \
+              --repo AlienXAXS/StarRupture-Game-SDK \
+              --pattern "plugin_interface.h" \
+              --dir /tmp \
+              --clobber 2>/dev/null; then
+            FOUND_PI=true
+          elif [ -f "StarRupture SDK/include/plugin_interface.h" ]; then
+            cp "StarRupture SDK/include/plugin_interface.h" /tmp/plugin_interface.h
+            FOUND_PI=true
+          fi
 
+          VERSION_BUMP_MSG=""
           if [ "$FOUND_PI" = "true" ]; then
             OLD_MAX=$(grep -oP 'PLUGIN_INTERFACE_VERSION_MAX\s+\K[0-9]+' include/plugin_interface.h 2>/dev/null || echo "")
             NEW_MAX=$(grep -oP 'PLUGIN_INTERFACE_VERSION_MAX\s+\K[0-9]+' /tmp/plugin_interface.h 2>/dev/null || echo "")
@@ -127,7 +142,6 @@ jobs:
           git commit -m "chore: update StarRupture SDK to $LATEST_TAG$VERSION_BUMP_MSG"
           git push origin "$PR_BRANCH"
 
-          # Build PR body into a file to avoid YAML/shell multiline escaping issues.
           SDK_URL="https://github.com/AlienXAXS/StarRupture-Game-SDK/releases/tag/$LATEST_TAG"
           if [ -n "$VERSION_BUMP_MSG" ]; then
             printf 'Updates the StarRupture SDK submodule to [%s](%s).\n\nAlso includes a `plugin_interface.h` update and VERSION bump. Merging this PR will automatically create a release tag via auto-tag.yml.' \
