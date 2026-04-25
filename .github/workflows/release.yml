@@ -1,4 +1,4 @@
-name: Release TimerMod
+name: Build and Release
 
 on:
   push:
@@ -11,6 +11,8 @@ permissions:
 jobs:
   release:
     runs-on: windows-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout repository
@@ -22,43 +24,100 @@ jobs:
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v3
 
-      - name: Generate build tag
-        id: tag
-        shell: pwsh
-        run: |
-          $tag = "${{ github.ref_name }}"
-          echo "BUILD_TAG=$tag" >> $env:GITHUB_OUTPUT
-
       - name: Build Client Release
         run: |
           msbuild "StarRupture-TimerMod.sln" `
             /p:Configuration="Client Release" `
             /p:Platform=x64 `
-            /p:ModLoaderBuildTag="${{ steps.tag.outputs.BUILD_TAG }}" `
+            /p:ModLoaderBuildTag="${{ github.ref_name }}" `
             /m `
             /v:minimal
 
-      - name: Build Server Release
-        run: |
-          msbuild "StarRupture-TimerMod.sln" `
-            /p:Configuration="Server Release" `
-            /p:Platform=x64 `
-            /p:ModLoaderBuildTag="${{ steps.tag.outputs.BUILD_TAG }}" `
-            /m `
-            /v:minimal
-
-      - name: Stage release artifacts
+      - name: Generate release assets
+        id: assets
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path release
-          Copy-Item "bin\x64\Client Release\plugins\TimerMod.dll" -Destination "release\TimerMod.dll"
-          Copy-Item "bin\x64\Server Release\plugins\TimerMod-Server.dll" -Destination "release\TimerMod-Server.dll"
+          $tag    = "${{ github.ref_name }}"
+          $repo   = "${{ github.repository }}"
+          $ws     = $env:GITHUB_WORKSPACE
+          $name   = "TimerMod"
+          $varLow = "client"
+
+          # Read interface version range from local plugin_interface.h
+          $header   = Get-Content "$ws\include\plugin_interface.h" -Raw
+          $matchMin = [regex]::Match($header, '#define\s+PLUGIN_INTERFACE_VERSION_MIN\s+(\d+)')
+          $matchMax = [regex]::Match($header, '#define\s+PLUGIN_INTERFACE_VERSION_MAX\s+(\d+)')
+          if (-not $matchMin.Success) { throw "PLUGIN_INTERFACE_VERSION_MIN not found in plugin_interface.h" }
+          if (-not $matchMax.Success) { throw "PLUGIN_INTERFACE_VERSION_MAX not found in plugin_interface.h" }
+          $ifaceMin = [int]$matchMin.Groups[1].Value
+          $ifaceMax = [int]$matchMax.Groups[1].Value
+          Write-Host "Interface version range: [$ifaceMin, $ifaceMax]"
+
+          # Get modloader version from SDK submodule
+          $sdkTag = (& git -C "StarRupture SDK" describe --tags --exact-match HEAD 2>$null)
+          if (-not $sdkTag) { $sdkTag = (& git -C "StarRupture SDK" rev-parse --short HEAD) }
+          $sdkTag = $sdkTag.Trim()
+          Write-Host "Modloader (SDK) version: $sdkTag"
+          echo "SDK_TAG=$sdkTag" >> $env:GITHUB_OUTPUT
+
+          # Standalone DLL
+          $dllSrc = "$ws\bin\x64\Client Release\plugins\$name.dll"
+          Copy-Item $dllSrc "$ws\$name-Client.dll"
+
+          # Per-plugin update manifest
+          $manifest = [ordered]@{
+            plugin_name           = $name
+            version               = $tag
+            interface_version_min = $ifaceMin
+            interface_version_max = $ifaceMax
+            download_url          = "https://github.com/$repo/releases/download/$tag/$name-Client.dll"
+          }
+          $manifest | ConvertTo-Json -Depth 1 | Out-File "$ws\$name-$varLow-manifest.json" -Encoding utf8NoBOM
+          Write-Host "Manifest:"
+          Get-Content "$ws\$name-$varLow-manifest.json"
+
+          # Sidecar JSON (goes inside ZIP alongside the DLL)
+          $sidecar = [ordered]@{
+            manifest_url = "https://github.com/$repo/releases/latest/download/$name-$varLow-manifest.json"
+          }
+
+          # ZIP: Plugins\Name.dll + Plugins\Name.json
+          $staging = "$ws\staging\Plugins"
+          New-Item -ItemType Directory -Force $staging | Out-Null
+          Copy-Item $dllSrc "$staging\$name.dll"
+          $sidecar | ConvertTo-Json -Depth 1 | Out-File "$staging\$name.json" -Encoding utf8NoBOM
+
+          $zipPath = "$ws\$name-Client-$tag.zip"
+          Compress-Archive -Path "$ws\staging\*" -DestinationPath $zipPath
+          Write-Host "Created ZIP: $name-Client-$tag.zip"
+          echo "ZIP_PATH=$zipPath" >> $env:GITHUB_OUTPUT
+          echo "NEXUS_VERSION=$($tag.TrimStart('v'))" >> $env:GITHUB_OUTPUT
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag  = "${{ github.ref_name }}"
+          $ws   = $env:GITHUB_WORKSPACE
+          $name = "TimerMod"
+
+          $assets = @(
+            "$ws\$name-Client.dll",
+            "$ws\$name-client-manifest.json",
+            "$ws\$name-Client-$tag.zip"
+          )
+
+          gh release create $tag @assets `
+            --title "TimerMod $tag" `
+            --generate-notes
+
+      - name: Upload to Nexus Mods
+        uses: Nexus-Mods/upload-action@main
         with:
-          name: "RuptureTimer ${{ github.ref_name }}"
-          generate_release_notes: true
-          files: |
-            release/TimerMod.dll
-            release/TimerMod-Server.dll
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          file_group_id: ${{ vars.NEXUSMODS_FILE_GROUP_ID }}
+          filename: ${{ steps.assets.outputs.ZIP_PATH }}
+          display_name: "TimerMod ${{ github.ref_name }}"
+          description: "Supporting release ${{ steps.assets.outputs.SDK_TAG }} version of the AlienX Modloader."
+          version: ${{ steps.assets.outputs.NEXUS_VERSION }}
