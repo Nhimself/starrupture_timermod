@@ -96,6 +96,15 @@ namespace RuptureTimerConfig
 			"Append raw diagnostic lines to the overlay: stage int, wave number, raw timer values. Use to diagnose phase-reading issues.",
 			0.0f, 0.0f
 		},
+		// --- Obelisk (alien Monolith attack monitor) ---
+		{
+			"Obelisk",
+			"MonitorEnabled",
+			ConfigValueType::Boolean,
+			"false",
+			"Monitor nearby alien Obelisks (Monoliths) and surface their charge state when one is charging or attacking",
+			0.0f, 0.0f
+		},
 	};
 
 	static const ConfigSchema SCHEMA = {
@@ -181,6 +190,12 @@ namespace RuptureTimerConfig
 		static bool ShouldShowDebugInfo()
 		{
 			return (s_self && s_self->config) ? s_self->config->ReadBool(s_self, "HUD", "ShowDebugInfo", false) : false;
+		}
+
+		// --- Obelisk ---
+		static bool IsObeliskMonitorEnabled()
+		{
+			return (s_self && s_self->config) ? s_self->config->ReadBool(s_self, "Obelisk", "MonitorEnabled", false) : false;
 		}
 
 	private:

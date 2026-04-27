@@ -2,6 +2,7 @@
 #include "plugin_helpers.h"
 #include "plugin_config.h"
 #include "timer_tracker.h"
+#include "obelisk_tracker.h"
 #include "wave_packet.h"
 #include "data_export.h"
 #include "hud_overlay.h"
@@ -106,6 +107,16 @@ static void OnEngineTick(float deltaSeconds)
 	DataExport::Update(deltaSeconds, s_lastState);
 	DataExport::UpdateDiagnosticLog(deltaSeconds, s_lastState);
 	HudOverlay::SetState(s_lastState);
+
+	if (RuptureTimerConfig::Config::IsObeliskMonitorEnabled())
+	{
+		ObeliskTracker::Snapshot ob = ObeliskTracker::ReadCurrentState();
+		HudOverlay::SetObeliskState(ob);
+	}
+	else
+	{
+		HudOverlay::SetObeliskState(ObeliskTracker::Snapshot{});
+	}
 }
 
 // ---------------------------------------------------------------------------

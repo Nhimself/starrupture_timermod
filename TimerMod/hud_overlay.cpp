@@ -24,6 +24,7 @@ namespace HudOverlay
 // Both callbacks execute on the same game thread, so no locking is needed.
 // ---------------------------------------------------------------------------
 static RuptureTimer::TimerState s_state = {};
+static ObeliskTracker::Snapshot s_obelisk = {};
 
 // ---------------------------------------------------------------------------
 // Smooth display values — interpolated at wall-clock rate in OnPostRender.
@@ -261,7 +262,17 @@ static void OnPostRender(void* hudPtr)
 	}
 
 	const int debugLines = debugInfo ? 3 : 0;
-	const int totalLines = 3 + extendedLines + debugLines;
+
+	// Obelisk display: only render when the monitor is enabled and the
+	// highlighted obelisk is in an interesting state (i.e. not Disabled / Unknown
+	// — those are the idle states that aren't worth showing).
+	const bool obeliskOn = RuptureTimerConfig::Config::IsObeliskMonitorEnabled();
+	const bool obeliskShow = obeliskOn && s_obelisk.valid &&
+	                         s_obelisk.highlighted.state != ObeliskTracker::State::Unknown &&
+	                         s_obelisk.highlighted.state != ObeliskTracker::State::Disabled;
+	const int obeliskLines = obeliskShow ? 2 : 0;
+
+	const int totalLines = 3 + extendedLines + debugLines + obeliskLines;
 
 	float x, y;
 	CalcPosition(RuptureTimerConfig::Config::GetOverlayPosition(), scale, screenW, screenH, totalLines, x, y);
@@ -367,6 +378,49 @@ static void OnPostRender(void* hudPtr)
 			s_state.diag.rawGrowbackSubstage,
 			s_state.diag.rawPreWaveSubstage);
 		DrawLine(self, x, curY, scale, dbg3);
+		curY += lineH;
+	}
+
+	// --- Obelisk lines (Obelisk.MonitorEnabled = true) ---
+	if (obeliskShow)
+	{
+		const auto& o = s_obelisk.highlighted;
+		const char* stateName = "?";
+		switch (o.state)
+		{
+			case ObeliskTracker::State::Cooldown:                  stateName = "Cooldown";  break;
+			case ObeliskTracker::State::Enabled:                   stateName = "Enabled";   break;
+			case ObeliskTracker::State::EnabledAndVisiblyCharged:  stateName = "CHARGING";  break;
+			case ObeliskTracker::State::AttackInProgress:          stateName = "ATTACKING"; break;
+			default:                                               stateName = "?";         break;
+		}
+
+		char line[64];
+		if (o.distanceMeters >= 0.0f)
+			_snprintf_s(line, sizeof(line), _TRUNCATE, "Monolith: %s  %dm", stateName, (int)o.distanceMeters);
+		else
+			_snprintf_s(line, sizeof(line), _TRUNCATE, "Monolith: %s", stateName);
+		DrawLine(self, x, curY, scale, line);
+		curY += lineH;
+
+		// Charge value: render as a percentage when the obelisk is charging; otherwise
+		// summarise how many other obelisks are in active states.
+		char line2[64];
+		if (o.state == ObeliskTracker::State::EnabledAndVisiblyCharged)
+		{
+			float pct = o.charge;
+			if (pct <= 1.0f) pct *= 100.0f;
+			if (pct < 0.0f)   pct = 0.0f;
+			if (pct > 100.0f) pct = 100.0f;
+			_snprintf_s(line2, sizeof(line2), _TRUNCATE, "  Charge: %d%%  (%d charging)",
+				(int)pct, s_obelisk.chargingCount);
+		}
+		else
+		{
+			_snprintf_s(line2, sizeof(line2), _TRUNCATE, "  Active: %d charging / %d attacking",
+				s_obelisk.chargingCount, s_obelisk.attackingCount);
+		}
+		DrawLine(self, x, curY, scale, line2);
 	}
 }
 
@@ -399,6 +453,11 @@ void Remove(IPluginHooks* hooks)
 void SetState(const RuptureTimer::TimerState& state)
 {
 	s_state = state;
+}
+
+void SetObeliskState(const ObeliskTracker::Snapshot& snap)
+{
+	s_obelisk = snap;
 }
 
 } // namespace HudOverlay

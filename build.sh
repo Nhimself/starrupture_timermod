@@ -102,6 +102,7 @@ echo "Building TimerMod (Client Release)..."
     "TimerMod/plugin.cpp" \
     "TimerMod/plugin_config.cpp" \
     "TimerMod/timer_tracker.cpp" \
+    "TimerMod/obelisk_tracker.cpp" \
     "TimerMod/data_export.cpp" \
     "TimerMod/hud_overlay.cpp" \
     -static-libgcc \

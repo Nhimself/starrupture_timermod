@@ -250,6 +250,7 @@
     <ClInclude Include="..\include\plugin_interface.h" />
     <ClInclude Include="data_export.h" />
     <ClInclude Include="hud_overlay.h" />
+    <ClInclude Include="obelisk_tracker.h" />
     <ClInclude Include="plugin.h" />
     <ClInclude Include="plugin_config.h" />
     <ClInclude Include="plugin_helpers.h" />
@@ -283,6 +284,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)'=='Server Debug' Or '$(Configuration)'=='Server Release'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="timer_tracker.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)'=='Server Debug' Or '$(Configuration)'=='Server Release'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="obelisk_tracker.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)'=='Server Debug' Or '$(Configuration)'=='Server Release'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="server_plugin.cpp">

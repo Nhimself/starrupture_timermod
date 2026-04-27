@@ -1,6 +1,7 @@
 #pragma once
 
 #include "timer_tracker.h"
+#include "obelisk_tracker.h"
 
 struct IPluginHooks;
 
@@ -16,4 +17,8 @@ namespace HudOverlay
 	// Push a fresh timer state for the overlay to display.
 	// Call from the engine tick callback after ReadCurrentState().
 	void SetState(const RuptureTimer::TimerState& state);
+
+	// Push a fresh obelisk snapshot for the overlay to display.
+	// Pass an invalid (default-constructed) snapshot to clear.
+	void SetObeliskState(const ObeliskTracker::Snapshot& snap);
 }
