@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v1.4.0)'
+        required: true
 
 permissions:
   contents: write
@@ -13,6 +18,7 @@ jobs:
     runs-on: windows-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
     steps:
       - name: Checkout repository
@@ -20,6 +26,7 @@ jobs:
         with:
           submodules: recursive
           token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v3
@@ -29,7 +36,7 @@ jobs:
           msbuild "StarRupture-TimerMod.sln" `
             /p:Configuration="Client Release" `
             /p:Platform=x64 `
-            /p:ModLoaderBuildTag="${{ github.ref_name }}" `
+            /p:ModLoaderBuildTag="${{ env.RELEASE_TAG }}" `
             /m `
             /v:minimal
 
@@ -37,7 +44,7 @@ jobs:
         id: assets
         shell: pwsh
         run: |
-          $tag    = "${{ github.ref_name }}"
+          $tag    = "${{ env.RELEASE_TAG }}"
           $repo   = "${{ github.repository }}"
           $ws     = $env:GITHUB_WORKSPACE
           $name   = "TimerMod"
@@ -98,7 +105,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $tag  = "${{ github.ref_name }}"
+          $tag  = "${{ env.RELEASE_TAG }}"
           $ws   = $env:GITHUB_WORKSPACE
           $name = "TimerMod"
 
@@ -118,6 +125,6 @@ jobs:
           api_key: ${{ secrets.NEXUSMODS_API_KEY }}
           file_group_id: ${{ vars.NEXUSMODS_FILE_GROUP_ID }}
           filename: ${{ steps.assets.outputs.ZIP_PATH }}
-          display_name: "TimerMod ${{ github.ref_name }}"
+          display_name: "TimerMod ${{ env.RELEASE_TAG }}"
           description: "Supporting release ${{ steps.assets.outputs.SDK_TAG }} version of the AlienX Modloader."
           version: ${{ steps.assets.outputs.NEXUS_VERSION }}
