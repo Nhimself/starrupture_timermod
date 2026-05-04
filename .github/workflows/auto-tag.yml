@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          token: ${{ secrets.PAT_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Read VERSION and create tag
         run: |
@@ -35,4 +35,4 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag "$TAG"
           git push origin "$TAG"
-          echo "Created and pushed tag $TAG — release.yml will build and publish"
+          echo "Created and pushed tag $TAG"
