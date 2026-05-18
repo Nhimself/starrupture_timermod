@@ -113,6 +113,13 @@ namespace RuptureTimerConfig
 				s_self->config->InitializeFromSchema(s_self, &SCHEMA);
 		}
 
+		// Clear the cached self pointer on disposal so no post-shutdown caller
+		// dereferences a stale modloader handle.
+		static void Shutdown()
+		{
+			s_self = nullptr;
+		}
+
 		// --- General ---
 		static bool IsEnabled()
 		{

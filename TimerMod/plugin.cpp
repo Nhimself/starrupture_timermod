@@ -215,6 +215,10 @@ __declspec(dllexport) void PluginShutdown()
 			hooks->Engine->UnregisterOnTick(OnEngineTick);
 	}
 
+	// All game-thread callbacks are unregistered and the render thread is
+	// drained, so the cached config self pointer can no longer be used.
+	RuptureTimerConfig::Config::Shutdown();
+
 	g_self = nullptr;
 }
 

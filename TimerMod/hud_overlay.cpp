@@ -12,18 +12,89 @@
 
 #include "Engine_classes.hpp"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 
 namespace HudOverlay
 {
 
 // ---------------------------------------------------------------------------
-// Shared timer state — written by SetState() on the game tick,
-// read by Hooked_PostRender() on the render tick.
-// Both callbacks execute on the same game thread, so no locking is needed.
+// Threading model — IMPORTANT
+//
+// OnPostRender() is invoked by the engine HUD render path, which the modloader
+// documents as potentially running on a DIFFERENT thread than the game tick.
+// SetState() is called from the game thread (engine tick / experience-load).
+//
+// Consequences this code must defend against:
+//   1. SetState() (game thread) and OnPostRender() (render thread) touch shared
+//      state concurrently → guarded by s_mutex.
+//   2. On disable / reload / shutdown, PluginShutdown() runs on the game thread,
+//      calls Remove(), and the modloader then FreeLibrary()s this DLL. If the
+//      render thread is inside OnPostRender() at that moment, the code/data it
+//      uses is unmapped → EXCEPTION_ACCESS_VIOLATION. Remove() therefore drains
+//      any in-flight render before returning (see Remove()).
+//   3. The render thread must never dereference a pointer that lives in this
+//      DLL (string literals) or call back into the modloader (s_self->config),
+//      because those are gone after unload. OnPostRender() therefore consumes
+//      ONLY a value-type snapshot whose strings are inline char buffers and
+//      whose config values were captured on the game thread.
 // ---------------------------------------------------------------------------
-static RuptureTimer::TimerState s_state = {};
+
+// Value-only snapshot consumed by the render thread. Contains no pointers into
+// this DLL and no live config handles — safe to read after disposal has begun.
+struct HudSnapshot
+{
+	bool                       valid = false;
+	RuptureTimer::RupturePhase phase = RuptureTimer::RupturePhase::Unknown;
+
+	float nextRuptureInSeconds  = -1.0f;
+	float phaseRemainingSeconds = -1.0f;
+	float stableRemaining       = -1.0f;
+	float warningRemaining      = -1.0f;
+	float burningRemaining      = -1.0f;
+	float coolingRemaining      = -1.0f;
+	float stabilizingRemaining  = -1.0f;
+
+	int32_t waveNumber = 0;
+	bool    paused     = false;
+	uint8_t waveType   = 0;
+
+	char phaseName[16]    = "Unknown";
+	char waveTypeName[8]  = "None";
+
+	// Diagnostic fields used by the ShowDebugInfo lines only.
+	int  rawStage            = -1;
+	int  rawFadeoutSubstage  = -1;
+	int  rawGrowbackSubstage = -1;
+	int  rawPreWaveSubstage  = -1;
+	char codePath[16]        = "none";
+	char rawSubstageName[24] = "None";
+
+	// Config values captured on the game thread (never read from s_self here).
+	bool  cfgShowOverlay = false;
+	float cfgScale       = 1.0f;
+	bool  cfgExtended    = false;
+	bool  cfgDebugInfo   = false;
+	char  cfgPosition[64] = "LowerLeft";
+};
+
+// Shared snapshot — written by SetState() (game thread), read by
+// OnPostRender() (render thread). s_mutex guards every access. s_installed is
+// the fast-path gate checked before the lock so a post-disposal render bails
+// without touching shared state.
+static std::mutex          s_mutex;
+static HudSnapshot         s_snapshot;
+static std::atomic<bool>   s_installed{false};
+
+// Copy a C string into a fixed buffer with guaranteed null-termination.
+template <size_t N>
+static void CopyStr(char (&dst)[N], const char* src)
+{
+	if (!src) { dst[0] = '\0'; return; }
+	_snprintf_s(dst, N, _TRUNCATE, "%s", src);
+}
 
 // ---------------------------------------------------------------------------
 // Smooth display values — interpolated at wall-clock rate in OnPostRender.
@@ -42,6 +113,10 @@ static RuptureTimer::TimerState s_state = {};
 // play.  10 s absorbs those and any QPC drift over long stable periods (the
 // stable phase runs ~45 min) while still catching legitimate phase-change
 // jumps, which are always >= 30 s.
+//
+// These statics are touched ONLY by OnPostRender (render thread, single
+// threaded for HUD), so they need no lock. They are reset in Install() so a
+// re-enable starts from a clean slate.
 // ---------------------------------------------------------------------------
 static constexpr float SNAP_THRESHOLD = 10.0f;
 
@@ -164,21 +239,34 @@ static void CalcPosition(const char* posName, float scale,
 }
 
 // ---------------------------------------------------------------------------
-// PostRender callback — registered via hooks->HUD->RegisterOnPostRender (v16)
+// PostRender callback — registered via hooks->HUD->RegisterOnPostRender (v16).
+// Runs on the render thread. See the threading-model note at the top.
 // ---------------------------------------------------------------------------
 
 static void OnPostRender(void* hudPtr)
 {
-	auto* self = static_cast<SDK::AHUD*>(hudPtr);
+	// Fast-path gate: if disposal has started, bail before touching anything.
+	if (!s_installed.load(std::memory_order_acquire))
+		return;
 
+	auto* self = static_cast<SDK::AHUD*>(hudPtr);
 	if (!self || !self->Canvas)
 		return;
 
-	if (!RuptureTimerConfig::Config::ShouldShowOverlay())
+	// Hold the lock for the WHOLE body. This is what lets Remove() guarantee
+	// that no render is in flight before the DLL is unloaded: Remove() acquires
+	// the same lock once as a drain barrier. The body is a few DrawText calls,
+	// so the game thread blocking on it for at most one HUD frame is fine.
+	std::lock_guard<std::mutex> lk(s_mutex);
+
+	// Re-check under the lock: Remove() clears s_installed before draining.
+	if (!s_installed.load(std::memory_order_relaxed))
 		return;
 
-	if (!s_state.valid)
-		return;
+	const HudSnapshot snap = s_snapshot;
+
+	if (!snap.valid)          return;
+	if (!snap.cfgShowOverlay) return;
 
 	// -----------------------------------------------------------------------
 	// Step 1 — compute wall-clock frame delta via QPC.
@@ -216,8 +304,8 @@ static void OnPostRender(void* hudPtr)
 	//   • Discrepancy > threshold  → snap (genuine phase-transition jump).
 	//   • Small discrepancy        → ignore; local interpolation is smoother.
 	// -----------------------------------------------------------------------
-	bool phaseChanged = (s_state.phase != s_prevPhase);
-	s_prevPhase = s_state.phase;
+	bool phaseChanged = (snap.phase != s_prevPhase);
+	s_prevPhase = snap.phase;
 
 	auto Sync = [phaseChanged](float& disp, float srv)
 	{
@@ -229,9 +317,9 @@ static void OnPostRender(void* hudPtr)
 		// else: keep locally interpolated value
 	};
 
-	Sync(s_dispNextRup,   s_state.nextRuptureInSeconds);
-	Sync(s_dispPhaseRem,  s_state.phaseRemainingSeconds);
-	Sync(s_dispStableRem, s_state.stableRemaining);
+	Sync(s_dispNextRup,   snap.nextRuptureInSeconds);
+	Sync(s_dispPhaseRem,  snap.phaseRemainingSeconds);
+	Sync(s_dispStableRem, snap.stableRemaining);
 
 	if (s_dispNextRup   < 0.0f) s_dispNextRup   = 0.0f;
 	if (s_dispPhaseRem  < 0.0f) s_dispPhaseRem  = 0.0f;
@@ -243,34 +331,34 @@ static void OnPostRender(void* hudPtr)
 	if (screenW <= 0.0f || screenH <= 0.0f)
 		return;
 
-	const float scale = RuptureTimerConfig::Config::GetOverlayScale();
+	const float scale = snap.cfgScale;
 	const float lineH = LINE_H_BASE * scale;
 
-	const bool extended  = RuptureTimerConfig::Config::ShouldWriteExtendedPhaseTimers();
-	const bool debugInfo = RuptureTimerConfig::Config::ShouldShowDebugInfo();
+	const bool extended  = snap.cfgExtended;
+	const bool debugInfo = snap.cfgDebugInfo;
 
 	// Count active extended lines (only for non-Stable phases)
 	int extendedLines = 0;
-	if (extended && s_state.phase != RuptureTimer::RupturePhase::Stable)
+	if (extended && snap.phase != RuptureTimer::RupturePhase::Stable)
 	{
-		if (s_state.warningRemaining     >= 0.0f) extendedLines++;
-		if (s_state.burningRemaining     >= 0.0f) extendedLines++;
-		if (s_state.coolingRemaining     >= 0.0f) extendedLines++;
-		if (s_state.stabilizingRemaining >= 0.0f) extendedLines++;
-		if (s_state.stableRemaining      >= 0.0f) extendedLines++;
+		if (snap.warningRemaining     >= 0.0f) extendedLines++;
+		if (snap.burningRemaining     >= 0.0f) extendedLines++;
+		if (snap.coolingRemaining     >= 0.0f) extendedLines++;
+		if (snap.stabilizingRemaining >= 0.0f) extendedLines++;
+		if (snap.stableRemaining      >= 0.0f) extendedLines++;
 	}
 
 	const int debugLines = debugInfo ? 3 : 0;
 	const int totalLines = 3 + extendedLines + debugLines;
 
 	float x, y;
-	CalcPosition(RuptureTimerConfig::Config::GetOverlayPosition(), scale, screenW, screenH, totalLines, x, y);
+	CalcPosition(snap.cfgPosition, scale, screenW, screenH, totalLines, x, y);
 
 	float curY = y;
 
 	// --- Line 1: Next Rupture countdown ---
 	char nextBuf[16];
-	FormatTime(nextBuf, sizeof(nextBuf), s_state.nextRuptureInSeconds >= 0.0f ? s_dispNextRup : -1.0f, /*nowOnZero=*/true);
+	FormatTime(nextBuf, sizeof(nextBuf), snap.nextRuptureInSeconds >= 0.0f ? s_dispNextRup : -1.0f, /*nowOnZero=*/true);
 
 	char line1[48];
 	_snprintf_s(line1, sizeof(line1), _TRUNCATE, "Next Rupture: %s", nextBuf);
@@ -279,17 +367,17 @@ static void OnPostRender(void* hudPtr)
 
 	// --- Line 2: Planet status (phase + wave type if active) ---
 	char line2[48];
-	const bool waveActive = (s_state.waveType != 0); // 0 = None
+	const bool waveActive = (snap.waveType != 0); // 0 = None
 	if (waveActive)
-		_snprintf_s(line2, sizeof(line2), _TRUNCATE, "Planet: %s (%s)", s_state.phaseName, s_state.waveTypeName);
+		_snprintf_s(line2, sizeof(line2), _TRUNCATE, "Planet: %s (%s)", snap.phaseName, snap.waveTypeName);
 	else
-		_snprintf_s(line2, sizeof(line2), _TRUNCATE, "Planet: %s", s_state.phaseName);
+		_snprintf_s(line2, sizeof(line2), _TRUNCATE, "Planet: %s", snap.phaseName);
 	DrawLine(self, x, curY, scale, line2);
 	curY += lineH;
 
 	// --- Line 3: Current phase timer ---
 	char phaseBuf[16];
-	FormatTime(phaseBuf, sizeof(phaseBuf), s_state.phaseRemainingSeconds >= 0.0f ? s_dispPhaseRem : -1.0f);
+	FormatTime(phaseBuf, sizeof(phaseBuf), snap.phaseRemainingSeconds >= 0.0f ? s_dispPhaseRem : -1.0f);
 
 	char line3[48];
 	_snprintf_s(line3, sizeof(line3), _TRUNCATE, "Wave Timer: %s", phaseBuf);
@@ -297,40 +385,40 @@ static void OnPostRender(void* hudPtr)
 	curY += lineH;
 
 	// --- Extended phase breakdown (ExtendedPhaseTimers=true, non-Stable phases only) ---
-	if (extended && s_state.phase != RuptureTimer::RupturePhase::Stable)
+	if (extended && snap.phase != RuptureTimer::RupturePhase::Stable)
 	{
 		char buf[48];
 		char tbuf[16];
 
-		if (s_state.warningRemaining >= 0.0f)
+		if (snap.warningRemaining >= 0.0f)
 		{
-			FormatTime(tbuf, sizeof(tbuf), s_state.warningRemaining);
+			FormatTime(tbuf, sizeof(tbuf), snap.warningRemaining);
 			_snprintf_s(buf, sizeof(buf), _TRUNCATE, "  Warning:     %s", tbuf);
 			DrawLine(self, x, curY, scale, buf);
 			curY += lineH;
 		}
-		if (s_state.burningRemaining >= 0.0f)
+		if (snap.burningRemaining >= 0.0f)
 		{
-			FormatTime(tbuf, sizeof(tbuf), s_state.burningRemaining);
+			FormatTime(tbuf, sizeof(tbuf), snap.burningRemaining);
 			_snprintf_s(buf, sizeof(buf), _TRUNCATE, "  Burning:     %s", tbuf);
 			DrawLine(self, x, curY, scale, buf);
 			curY += lineH;
 		}
-		if (s_state.coolingRemaining >= 0.0f)
+		if (snap.coolingRemaining >= 0.0f)
 		{
-			FormatTime(tbuf, sizeof(tbuf), s_state.coolingRemaining);
+			FormatTime(tbuf, sizeof(tbuf), snap.coolingRemaining);
 			_snprintf_s(buf, sizeof(buf), _TRUNCATE, "  Cooling:     %s", tbuf);
 			DrawLine(self, x, curY, scale, buf);
 			curY += lineH;
 		}
-		if (s_state.stabilizingRemaining >= 0.0f)
+		if (snap.stabilizingRemaining >= 0.0f)
 		{
-			FormatTime(tbuf, sizeof(tbuf), s_state.stabilizingRemaining);
+			FormatTime(tbuf, sizeof(tbuf), snap.stabilizingRemaining);
 			_snprintf_s(buf, sizeof(buf), _TRUNCATE, "  Stabilizing: %s", tbuf);
 			DrawLine(self, x, curY, scale, buf);
 			curY += lineH;
 		}
-		if (s_state.stableRemaining >= 0.0f)
+		if (snap.stableRemaining >= 0.0f)
 		{
 			FormatTime(tbuf, sizeof(tbuf), s_dispStableRem);
 			_snprintf_s(buf, sizeof(buf), _TRUNCATE, "  Stable:      %s", tbuf);
@@ -344,17 +432,17 @@ static void OnPostRender(void* hudPtr)
 	{
 		char dbg1[80];
 		_snprintf_s(dbg1, sizeof(dbg1), _TRUNCATE, "[Wave:%d RawStage:%d Path:%s]",
-			s_state.waveNumber,
-			s_state.diag.rawStage,
-			s_state.diag.codePath ? s_state.diag.codePath : "?");
+			snap.waveNumber,
+			snap.rawStage,
+			snap.codePath);
 		DrawLine(self, x, curY, scale, dbg1);
 		curY += lineH;
 
 		char dbg2[64];
 		_snprintf_s(dbg2, sizeof(dbg2), _TRUNCATE, "[PhRem:%.1f Rup:%.1f %s]",
-			s_state.phaseRemainingSeconds,
-			s_state.nextRuptureInSeconds,
-			s_state.paused ? "PAUSED" : "");
+			snap.phaseRemainingSeconds,
+			snap.nextRuptureInSeconds,
+			snap.paused ? "PAUSED" : "");
 		DrawLine(self, x, curY, scale, dbg2);
 		curY += lineH;
 
@@ -362,10 +450,10 @@ static void OnPostRender(void* hudPtr)
 		// Compare against what the in-game UI displays to find name mismatches.
 		char dbg3[80];
 		_snprintf_s(dbg3, sizeof(dbg3), _TRUNCATE, "[Substage:%s FO:%d GB:%d PW:%d]",
-			s_state.diag.rawSubstageName  ? s_state.diag.rawSubstageName : "?",
-			s_state.diag.rawFadeoutSubstage,
-			s_state.diag.rawGrowbackSubstage,
-			s_state.diag.rawPreWaveSubstage);
+			snap.rawSubstageName,
+			snap.rawFadeoutSubstage,
+			snap.rawGrowbackSubstage,
+			snap.rawPreWaveSubstage);
 		DrawLine(self, x, curY, scale, dbg3);
 	}
 }
@@ -382,6 +470,19 @@ bool Install(IPluginHooks* hooks)
 		return false;
 	}
 
+	// Reset render-thread display state and shared snapshot so a re-enable
+	// within the same DLL load starts from a clean slate.
+	{
+		std::lock_guard<std::mutex> lk(s_mutex);
+		s_snapshot = HudSnapshot{};
+	}
+	s_dispNextRup   = -1.0f;
+	s_dispPhaseRem  = -1.0f;
+	s_dispStableRem = -1.0f;
+	s_prevPhase     = RuptureTimer::RupturePhase::Unknown;
+	s_qpcReady      = false;
+
+	s_installed.store(true, std::memory_order_release);
 	hooks->HUD->RegisterOnPostRender(OnPostRender);
 	LOG_INFO("[HudOverlay] PostRender callback registered via v16 HUD interface");
 	return true;
@@ -392,13 +493,56 @@ void Remove(IPluginHooks* hooks)
 	if (!hooks || !hooks->HUD)
 		return;
 
+	// Order matters for disposal safety:
+	//   1. Clear the gate so any render that has not yet locked bails fast.
+	//   2. Unregister so the modloader dispatches no new renders.
+	//   3. Drain: acquire+release s_mutex once. OnPostRender holds s_mutex for
+	//      its whole body, so once we hold it no render is in flight; once we
+	//      release it none can start (gate cleared + unregistered). It is now
+	//      safe for the modloader to FreeLibrary() this DLL.
+	s_installed.store(false, std::memory_order_release);
 	hooks->HUD->UnregisterOnPostRender(OnPostRender);
-	LOG_INFO("[HudOverlay] PostRender callback unregistered");
+	{
+		std::lock_guard<std::mutex> lk(s_mutex);
+	}
+	LOG_INFO("[HudOverlay] PostRender callback unregistered and render thread drained");
 }
 
 void SetState(const RuptureTimer::TimerState& state)
 {
-	s_state = state;
+	// Called on the game thread. Build a value-only snapshot (copying strings
+	// into inline buffers) and capture config here so the render thread never
+	// dereferences a DLL pointer or calls back into the modloader.
+	HudSnapshot s;
+	s.valid                 = state.valid;
+	s.phase                 = state.phase;
+	s.nextRuptureInSeconds  = state.nextRuptureInSeconds;
+	s.phaseRemainingSeconds = state.phaseRemainingSeconds;
+	s.stableRemaining       = state.stableRemaining;
+	s.warningRemaining      = state.warningRemaining;
+	s.burningRemaining      = state.burningRemaining;
+	s.coolingRemaining      = state.coolingRemaining;
+	s.stabilizingRemaining  = state.stabilizingRemaining;
+	s.waveNumber            = state.waveNumber;
+	s.paused                = state.paused;
+	s.waveType              = state.waveType;
+	CopyStr(s.phaseName,    state.phaseName);
+	CopyStr(s.waveTypeName, state.waveTypeName);
+	s.rawStage              = state.diag.rawStage;
+	s.rawFadeoutSubstage    = state.diag.rawFadeoutSubstage;
+	s.rawGrowbackSubstage   = state.diag.rawGrowbackSubstage;
+	s.rawPreWaveSubstage    = state.diag.rawPreWaveSubstage;
+	CopyStr(s.codePath,        state.diag.codePath);
+	CopyStr(s.rawSubstageName, state.diag.rawSubstageName);
+
+	s.cfgShowOverlay = RuptureTimerConfig::Config::ShouldShowOverlay();
+	s.cfgScale       = RuptureTimerConfig::Config::GetOverlayScale();
+	s.cfgExtended    = RuptureTimerConfig::Config::ShouldWriteExtendedPhaseTimers();
+	s.cfgDebugInfo   = RuptureTimerConfig::Config::ShouldShowDebugInfo();
+	CopyStr(s.cfgPosition, RuptureTimerConfig::Config::GetOverlayPosition());
+
+	std::lock_guard<std::mutex> lk(s_mutex);
+	s_snapshot = s;
 }
 
 } // namespace HudOverlay
