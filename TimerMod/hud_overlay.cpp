@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <string>
 
 namespace HudOverlay
 {
@@ -81,12 +82,16 @@ struct HudSnapshot
 };
 
 // Shared snapshot — written by SetState() (game thread), read by
-// OnPostRender() (render thread). s_mutex guards every access. s_installed is
-// the fast-path gate checked before the lock so a post-disposal render bails
-// without touching shared state.
+// OnPostRender() (render thread). s_mutex guards ONLY the snapshot copy and is
+// never held across an engine DrawText call (doing so can deadlock against
+// UE's render/game-thread fences). s_installed is the fast-path gate.
+// s_renderActive counts OnPostRender bodies currently in flight so Remove()
+// can drain them before the DLL is unloaded, without holding a lock across
+// the engine.
 static std::mutex          s_mutex;
 static HudSnapshot         s_snapshot;
 static std::atomic<bool>   s_installed{false};
+static std::atomic<int>    s_renderActive{0};
 
 // Copy a C string into a fixed buffer with guaranteed null-termination.
 template <size_t N>
@@ -125,6 +130,10 @@ static float s_dispPhaseRem  = -1.0f;
 static float s_dispStableRem = -1.0f;
 
 static RuptureTimer::RupturePhase s_prevPhase = RuptureTimer::RupturePhase::Unknown;
+
+// Last world name seen by OnPostRender (render-thread only). Used to gate the
+// overlay to the actual game world and to log world changes once.
+static std::string s_lastWorldName;
 
 static LARGE_INTEGER s_qpcFreq      = {};
 static LARGE_INTEGER s_lastQpcTime  = {};
@@ -253,17 +262,59 @@ static void OnPostRender(void* hudPtr)
 	if (!self || !self->Canvas)
 		return;
 
-	// Hold the lock for the WHOLE body. This is what lets Remove() guarantee
-	// that no render is in flight before the DLL is unloaded: Remove() acquires
-	// the same lock once as a drain barrier. The body is a few DrawText calls,
-	// so the game thread blocking on it for at most one HUD frame is fine.
-	std::lock_guard<std::mutex> lk(s_mutex);
+	// Mark this render in flight so Remove() can drain it. RAII so every
+	// early-return path below decrements. Increment FIRST, then re-check the
+	// gate: this orders against Remove() (clears gate, then waits for the
+	// count to reach zero).
+	s_renderActive.fetch_add(1, std::memory_order_acq_rel);
+	struct ActiveGuard
+	{
+		~ActiveGuard() { s_renderActive.fetch_sub(1, std::memory_order_acq_rel); }
+	} activeGuard;
 
-	// Re-check under the lock: Remove() clears s_installed before draining.
-	if (!s_installed.load(std::memory_order_relaxed))
+	if (!s_installed.load(std::memory_order_acquire))
 		return;
 
-	const HudSnapshot snap = s_snapshot;
+	// Only draw in the actual game world. GetWorld()/GetName() touch engine
+	// globals from the render thread, so wrap them (per modloader guidance).
+	SDK::UWorld* world = nullptr;
+	try
+	{
+		world = SDK::UWorld::GetWorld();
+	}
+	catch (...)
+	{
+		LOG_ERROR("[HudOverlay] exception in GetWorld — skipping draw");
+		return;
+	}
+	if (!world)
+		return;
+
+	std::string worldName;
+	try
+	{
+		worldName = world->GetName();
+	}
+	catch (...)
+	{
+		LOG_ERROR("[HudOverlay] exception in GetName — skipping draw");
+		return;
+	}
+	if (worldName != s_lastWorldName)
+	{
+		LOG_INFO("[HudOverlay] world: '%s'", worldName.c_str());
+		s_lastWorldName = worldName;
+	}
+	if (worldName != "ChimeraMain")
+		return;
+
+	// Copy the shared snapshot under the lock, then release it. The lock is
+	// NOT held across any DrawText call — only across this trivial copy.
+	HudSnapshot snap;
+	{
+		std::lock_guard<std::mutex> lk(s_mutex);
+		snap = s_snapshot;
+	}
 
 	if (!snap.valid)          return;
 	if (!snap.cfgShowOverlay) return;
@@ -481,6 +532,7 @@ bool Install(IPluginHooks* hooks)
 	s_dispStableRem = -1.0f;
 	s_prevPhase     = RuptureTimer::RupturePhase::Unknown;
 	s_qpcReady      = false;
+	s_lastWorldName.clear();
 
 	s_installed.store(true, std::memory_order_release);
 	hooks->HUD->RegisterOnPostRender(OnPostRender);
@@ -494,16 +546,28 @@ void Remove(IPluginHooks* hooks)
 		return;
 
 	// Order matters for disposal safety:
-	//   1. Clear the gate so any render that has not yet locked bails fast.
+	//   1. Clear the gate so a render that has not yet entered bails fast.
 	//   2. Unregister so the modloader dispatches no new renders.
-	//   3. Drain: acquire+release s_mutex once. OnPostRender holds s_mutex for
-	//      its whole body, so once we hold it no render is in flight; once we
-	//      release it none can start (gate cleared + unregistered). It is now
-	//      safe for the modloader to FreeLibrary() this DLL.
+	//   3. Drain: wait until no OnPostRender body is in flight. We never hold
+	//      s_mutex across an engine DrawText call, so this spin cannot deadlock
+	//      against the engine's render/game-thread fences. Once the count is
+	//      zero and the gate is cleared + unregistered, it is safe for the
+	//      modloader to FreeLibrary() this DLL.
+	//
+	// Residual: a render the modloader dispatched but has not yet entered
+	// (before its first instruction) cannot be fenced from the plugin side;
+	// closing that fully requires the loader to quiesce the render thread in
+	// UnregisterOnPostRender. This drains every realistic in-flight case.
 	s_installed.store(false, std::memory_order_release);
 	hooks->HUD->UnregisterOnPostRender(OnPostRender);
+	for (int i = 0; s_renderActive.load(std::memory_order_acquire) != 0; ++i)
 	{
-		std::lock_guard<std::mutex> lk(s_mutex);
+		if (i >= 5000) // ~5 s; far beyond one HUD frame — give up rather than hang.
+		{
+			LOG_ERROR("[HudOverlay] render drain timed out — proceeding (rare unload race possible)");
+			break;
+		}
+		::Sleep(1);
 	}
 	LOG_INFO("[HudOverlay] PostRender callback unregistered and render thread drained");
 }
