@@ -251,7 +251,7 @@ __declspec(dllexport) PluginInfo* GetPluginInfo() { return &s_pluginInfo; }
 __declspec(dllexport) bool PluginInit(IPluginSelf* self)
 {
 	g_self = self;
-	LOG_INFO("RuptureTimerServer initializing...");
+	LOG_INFO("Initializing...");
 
 	if (!self || !self->hooks)
 	{
@@ -281,13 +281,13 @@ __declspec(dllexport) bool PluginInit(IPluginSelf* self)
 		}
 	}
 
-	LOG_INFO("RuptureTimerServer initialized — broadcasting every %.0fs + on phase change", HEARTBEAT);
+	LOG_INFO("Initialized — broadcasting every %.0fs + on phase change", HEARTBEAT);
 	return true;
 }
 
 __declspec(dllexport) void PluginShutdown()
 {
-	LOG_INFO("RuptureTimerServer shutting down...");
+	LOG_INFO("Shutting down...");
 	s_worldReady = false;
 	if (g_self && g_self->hooks)
 	{

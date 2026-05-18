@@ -141,6 +141,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <ExceptionHandling>Async</ExceptionHandling>
       <AdditionalIncludeDirectories>$(SolutionDir)StarRupture SDK\Server\;$(SolutionDir)StarRupture SDK\Server\SDK;$(ProjectDir);$(SolutionDir)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -160,6 +161,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <ExceptionHandling>Async</ExceptionHandling>
       <AdditionalIncludeDirectories>$(SolutionDir)StarRupture SDK\Server\;$(SolutionDir)StarRupture SDK\Server\SDK;$(ProjectDir);$(SolutionDir)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -179,6 +181,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <ExceptionHandling>Async</ExceptionHandling>
       <AdditionalIncludeDirectories>$(StarRuptureSDKConfigDir);$(SolutionDir)StarRupture SDK\Server\;$(SolutionDir)StarRupture SDK\Server\SDK;$(ProjectDir);$(SolutionDir)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -198,6 +201,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <ExceptionHandling>Async</ExceptionHandling>
       <AdditionalIncludeDirectories>$(StarRuptureSDKConfigDir);$(SolutionDir)StarRupture SDK\Server\;$(SolutionDir)StarRupture SDK\Server\SDK;$(ProjectDir);$(SolutionDir)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -217,6 +221,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <ExceptionHandling>Async</ExceptionHandling>
       <AdditionalIncludeDirectories>$(StarRuptureSDKConfigDir);$(SolutionDir)StarRupture SDK\Server\;$(SolutionDir)StarRupture SDK\Server\SDK;$(ProjectDir);$(SolutionDir)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -236,6 +241,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <ExceptionHandling>Async</ExceptionHandling>
       <AdditionalIncludeDirectories>$(StarRuptureSDKConfigDir);$(SolutionDir)StarRupture SDK\Server\;$(SolutionDir)StarRupture SDK\Server\SDK;$(ProjectDir);$(SolutionDir)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>

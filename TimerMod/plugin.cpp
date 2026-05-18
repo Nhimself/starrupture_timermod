@@ -37,6 +37,40 @@ static PluginInfo s_pluginInfo = {
 static bool s_worldReady = false;
 static RuptureTimer::TimerState s_lastState{};
 
+// Hot-reload probe budget. When the plugin is reloaded via the mod menu into
+// an already-running game, no World/Experience callback fires (BeginPlay
+// already happened), so we detect a live world from the first engine ticks.
+// ~10 s at 60 fps tolerates GameState/WaveTimerActor replication latency.
+static int s_hotReloadProbeTicks = 600;
+
+// The HUD PostRender callback must NOT be registered from PluginInit: that
+// runs during UGameEngine::Init, before the engine/HUD exist, and hooking it
+// there faults inside engine init (loader stuck at 85%). Register it lazily
+// once the experience has loaded / a live world is detected, exactly once.
+static bool s_hudInstalled = false;
+
+static void MaybeInstallHud()
+{
+	if (s_hudInstalled)
+		return;
+	if (!RuptureTimerConfig::Config::ShouldShowOverlay())
+		return;
+
+	IPluginHooks* hooks = GetHooks();
+	if (!hooks)
+		return;
+
+	if (HudOverlay::Install(hooks))
+	{
+		s_hudInstalled = true;
+		LOG_INFO("HUD overlay installed");
+	}
+	else
+	{
+		LOG_WARN("HUD overlay could not be installed — in-game display will be unavailable");
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Callbacks
 // ---------------------------------------------------------------------------
@@ -65,6 +99,11 @@ static void OnAnyWorldBeginPlay(SDK::UWorld* world, const char* worldName)
 static void OnExperienceLoadComplete()
 {
 	LOG_INFO("Experience load complete — reading initial rupture timer state");
+
+	// Register the HUD PostRender callback here (per modloader guidance):
+	// PluginInit is too early — the engine/HUD do not exist yet.
+	MaybeInstallHud();
+
 	s_lastState = RuptureTimer::ReadCurrentState();
 	if (s_lastState.valid)
 	{
@@ -92,6 +131,23 @@ static void OnNetworkWaveState(const char* /*pluginName*/, const char* /*typeTag
 
 static void OnEngineTick(float deltaSeconds)
 {
+	// Hot-reload path: plugin reloaded into a running game. Engine ticks only
+	// fire after UGameEngine::Init has completed, so reading game state here is
+	// safe (unlike PluginInit). Bounded so we stop probing in menus.
+	if (!s_worldReady && s_hotReloadProbeTicks > 0)
+	{
+		--s_hotReloadProbeTicks;
+		RuptureTimer::TimerState probe = RuptureTimer::ReadCurrentState();
+		if (probe.valid)
+		{
+			LOG_INFO("Active game world detected on tick — starting tracking (hot-reload)");
+			s_worldReady = true;
+			DataExport::EnsureOutputDir();
+			DataExport::EnsureDiagnosticLogDir();
+			MaybeInstallHud();
+		}
+	}
+
 	if (!s_worldReady) return;
 
 	static float s_logAccum = 0.0f;
@@ -122,13 +178,13 @@ __declspec(dllexport) bool PluginInit(IPluginSelf* self)
 {
 	g_self = self;
 
-	LOG_INFO("RuptureTimer initializing...");
+	LOG_INFO("Initializing...");
 
 	RuptureTimerConfig::Config::Initialize(self);
 
 	if (!RuptureTimerConfig::Config::IsEnabled())
 	{
-		LOG_WARN("RuptureTimer is disabled in config");
+		LOG_WARN("Disabled in config");
 		return true;
 	}
 
@@ -160,30 +216,13 @@ __declspec(dllexport) bool PluginInit(IPluginSelf* self)
 		LOG_DEBUG("Registered network wave state handler");
 	}
 
-	if (RuptureTimerConfig::Config::ShouldShowOverlay())
-	{
-		if (!HudOverlay::Install(hooks))
-			LOG_WARN("HUD overlay could not be installed — in-game display will be unavailable");
-	}
-	else
-	{
-		LOG_DEBUG("HUD overlay disabled in config (HUD.ShowOverlay=false)");
-	}
+	// Do NOT register the HUD PostRender callback or read game state here.
+	// PluginInit runs during UGameEngine::Init, before the engine/HUD/world
+	// exist; hooking PostRender here faults inside engine init and leaves the
+	// loader stuck at 85%. The overlay is installed from OnExperienceLoadComplete
+	// (cold start) or the OnEngineTick probe (hot-reload). See MaybeInstallHud().
 
-	// Detect hot-reload into an already-running world.
-	{
-		s_lastState = RuptureTimer::ReadCurrentState();
-		if (s_lastState.valid)
-		{
-			LOG_INFO("Active game world detected on init — starting tracking immediately");
-			s_worldReady = true;
-			DataExport::EnsureOutputDir();
-			DataExport::EnsureDiagnosticLogDir();
-			HudOverlay::SetState(s_lastState);
-		}
-	}
-
-	LOG_INFO("RuptureTimer initialized — JSON output: %s | HUD overlay: %s",
+	LOG_INFO("Initialized — JSON output: %s | HUD overlay: %s",
 		RuptureTimerConfig::Config::GetJsonFilePath(),
 		RuptureTimerConfig::Config::ShouldShowOverlay() ? "enabled" : "disabled");
 
@@ -192,7 +231,7 @@ __declspec(dllexport) bool PluginInit(IPluginSelf* self)
 
 __declspec(dllexport) void PluginShutdown()
 {
-	LOG_INFO("RuptureTimer shutting down...");
+	LOG_INFO("Shutting down...");
 
 	s_worldReady = false;
 
@@ -200,7 +239,8 @@ __declspec(dllexport) void PluginShutdown()
 	{
 		auto* hooks = g_self->hooks;
 
-		HudOverlay::Remove(hooks);
+		if (s_hudInstalled)
+			HudOverlay::Remove(hooks);
 
 		if (hooks->Network && !hooks->Network->IsServer())
 			hooks->Network->UnregisterMessageHandler(g_self, WAVE_STATE_TYPE_TAG, OnNetworkWaveState);
@@ -214,6 +254,14 @@ __declspec(dllexport) void PluginShutdown()
 		if (hooks->Engine)
 			hooks->Engine->UnregisterOnTick(OnEngineTick);
 	}
+
+	// Reset lazy-init state so a reload starts clean.
+	s_hudInstalled        = false;
+	s_hotReloadProbeTicks = 600;
+
+	// All game-thread callbacks are unregistered and the render thread is
+	// drained, so the cached config self pointer can no longer be used.
+	RuptureTimerConfig::Config::Shutdown();
 
 	g_self = nullptr;
 }
