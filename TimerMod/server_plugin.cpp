@@ -27,7 +27,8 @@ static PluginInfo s_pluginInfo = {
 	MODLOADER_BUILD_TAG,
 	"Nhimself",
 	"Server-side companion: reads UCrEnviroWaveSubsystem and broadcasts WaveStatePacket to all clients.",
-	PLUGIN_INTERFACE_VERSION
+	PLUGIN_INTERFACE_VERSION,
+	PLUGIN_TARGET_SERVER   // v33: this DLL is the server build
 };
 
 // ---------------------------------------------------------------------------
