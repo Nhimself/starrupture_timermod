@@ -22,12 +22,30 @@
 //      SetWindowFontScale, GetContentRegionAvail, GetDisplaySize).
 //      Added PluginWindowHints struct and windowHints field to PluginWidgetDesc.
 //      MIN remains 23.
-#define PLUGIN_INTERFACE_VERSION_MIN 26
-#define PLUGIN_INTERFACE_VERSION_MAX 30
+// v31: Added extra_window_flags to PluginWindowHints.
+//      Allows plugins to pass additional ImGuiWindowFlags (e.g. NoTitleBar, NoResize).
+//      0 = no extra flags (default behaviour unchanged). MIN remains 26.
+// v32: Added IPluginClientSessionInfo (client only, null on server/generic).
+//      Exposes GetSessionOnlineMode, IsMultiplayer, IsServer query functions.
+// v33: Added pluginTarget field to PluginInfo. Every plugin must now declare
+//      PLUGIN_TARGET_CLIENT or PLUGIN_TARGET_SERVER. The loader rejects plugins
+//      that don't match the current build target.
+#define PLUGIN_INTERFACE_VERSION_MIN 33
+#define PLUGIN_INTERFACE_VERSION_MAX 33
 #define PLUGIN_INTERFACE_VERSION PLUGIN_INTERFACE_VERSION_MAX
 
 enum class PluginLogLevel { Trace = 0, Debug = 1, Info = 2, Warn = 3, Error = 4 };
 enum class ConfigValueType { String, Integer, Float, Boolean, Keybind };
+
+// Session online mode — mirrors ECrOnlineSessionMode / ECommonSessionOnlineMode from the game.
+// Offline = solo/standalone, LAN/Online = multiplayer session.
+enum class EPluginSessionOnlineMode : uint8_t
+{
+    Offline = 0,
+    LAN     = 1,
+    Online  = 2,
+    Unknown = 255
+};
 
 struct ConfigEntry
 {
@@ -310,6 +328,16 @@ struct IModLoaderImGui
 
 typedef void (*PluginImGuiRenderCallback)(IModLoaderImGui* imgui);
 
+// Flags for PluginWindowHints::extra_window_flags (v31).
+// Values mirror ImGuiWindowFlags so plugins do not need imgui.h.
+#define PluginWindowFlags_NoTitleBar        (1 << 0)
+#define PluginWindowFlags_NoResize          (1 << 1)
+#define PluginWindowFlags_NoMove            (1 << 2)
+#define PluginWindowFlags_NoScrollbar       (1 << 3)
+#define PluginWindowFlags_NoBackground      (1 << 7)
+#define PluginWindowFlags_NoSavedSettings   (1 << 8)
+#define PluginWindowFlags_NoMouseInputs     (1 << 9)
+
 // Optional size/position hints for RegisterWidget windows.
 // Set width/height to 0 for no size hint. Set pos_x/pos_y to -1 to skip positioning.
 // size_cond / pos_cond: 0 = Always, 1 = FirstUseEver.
@@ -323,6 +351,7 @@ struct PluginWindowHints
 	float pivot_y;
 	int   size_cond;
 	int   pos_cond;
+	int   extra_window_flags;  // v31: OR'd into ImGuiWindowFlags; 0 = default
 };
 
 struct PluginPanelDesc
@@ -529,6 +558,23 @@ struct IPluginHttpServer
 };
 
 // ---------------------------------------------------------------------------
+// Client session info (v32) — client only, null on server/generic
+// ---------------------------------------------------------------------------
+struct IPluginClientSessionInfo
+{
+    // Returns the current online mode read from UCrSessionSubsystem.
+    // Offline = solo/standalone, LAN or Online = connected to a session.
+    // Returns Unknown if the subsystem is not yet available.
+    EPluginSessionOnlineMode (*GetSessionOnlineMode)();
+
+    // Convenience: true if GetSessionOnlineMode() != Offline and != Unknown.
+    bool (*IsMultiplayer)();
+
+    // True when UCrSessionSubsystem::bIsServer is set (i.e. this instance is acting as server).
+    bool (*IsServer)();
+};
+
+// ---------------------------------------------------------------------------
 // Top-level hooks interface (v14+)
 // ---------------------------------------------------------------------------
 struct IPluginHooks
@@ -546,7 +592,20 @@ struct IPluginHooks
 	IPluginNetworkChannel* Network;   // v17 — server+client; null on generic
 	IPluginNativePointers* NativePointers; // v21
 	IPluginHttpServer*     HttpServer;     // v22 — server only, null on client/generic
+	IPluginClientSessionInfo* ClientSession; // v32 — client only, null on server/generic
 };
+
+// ---------------------------------------------------------------------------
+// Plugin build target
+// ---------------------------------------------------------------------------
+enum PluginTarget : int
+{
+    PLUGIN_TARGET_CLIENT = 0,
+    PLUGIN_TARGET_SERVER = 1,
+};
+
+#define PLUGIN_TARGET_CLIENT_ONLY  PLUGIN_TARGET_CLIENT
+#define PLUGIN_TARGET_SERVER_ONLY  PLUGIN_TARGET_SERVER
 
 // ---------------------------------------------------------------------------
 // Plugin metadata and identity
@@ -558,6 +617,7 @@ struct PluginInfo
 	const char* author;
 	const char* description;
 	int interfaceVersion;
+	int pluginTarget;  // PluginTarget value -- required
 };
 
 struct IPluginSelf
