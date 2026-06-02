@@ -43,6 +43,9 @@ jobs:
       - name: Generate release assets
         id: assets
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FALLBACK_MODLOADER_VERSION: ${{ vars.MODLOADER_VERSION }}
         run: |
           $tag    = "${{ env.RELEASE_TAG }}"
           $repo   = "${{ github.repository }}"
@@ -60,12 +63,52 @@ jobs:
           $ifaceMax = [int]$matchMax.Groups[1].Value
           Write-Host "Interface version range: [$ifaceMin, $ifaceMax]"
 
-          # Get modloader version from SDK submodule
-          $sdkTag = (& git -C "StarRupture SDK" describe --tags --exact-match HEAD 2>$null)
-          if (-not $sdkTag) { $sdkTag = (& git -C "StarRupture SDK" rev-parse --short HEAD) }
-          $sdkTag = $sdkTag.Trim()
-          Write-Host "Modloader (SDK) version: $sdkTag"
-          echo "SDK_TAG=$sdkTag" >> $env:GITHUB_OUTPUT
+          # Resolve the AlienX ModLoader release that pins this exact Game SDK commit.
+          # Both this repo and the ModLoader pin StarRupture-Game-SDK as a submodule at
+          # path "StarRupture SDK", so we match our pinned commit against each ModLoader
+          # release's submodule pointer. The match is used only when it is unambiguous
+          # (exactly one release); otherwise we fall back to the MODLOADER_VERSION repo
+          # variable so the Nexus description can never go blank or wrong silently.
+          $sdkCommit = (& git -C "StarRupture SDK" rev-parse HEAD).Trim()
+          Write-Host "Pinned Game SDK commit: $sdkCommit"
+
+          $mlRepo   = "AlienXAXS/StarRupture-ModLoader"
+          $sdkPath  = "StarRupture%20SDK"
+          $resolved = $null
+
+          $relJson = gh api "repos/$mlRepo/releases?per_page=100" 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            $releases = $relJson | ConvertFrom-Json
+            $hits = @()
+            foreach ($rel in $releases) {
+              $tag = $rel.tag_name
+              # contents API returns type=submodule + sha (the pinned commit) for a gitlink path
+              $entryJson = gh api "repos/$mlRepo/contents/${sdkPath}?ref=$tag" 2>$null
+              if ($LASTEXITCODE -ne 0) { continue }
+              $entry = $entryJson | ConvertFrom-Json
+              if ($entry.type -eq "submodule" -and $entry.sha -eq $sdkCommit) {
+                $hits += $tag
+              }
+            }
+            $hits = @($hits | Select-Object -Unique)
+            if ($hits.Count -eq 1) {
+              $resolved = $hits[0]
+              Write-Host "Matched ModLoader release by SDK pointer: $resolved"
+            } elseif ($hits.Count -gt 1) {
+              Write-Host "Ambiguous: multiple ModLoader releases pin $sdkCommit ($($hits -join ', ')). Falling back."
+            } else {
+              Write-Host "No ModLoader release pins $sdkCommit. Falling back."
+            }
+          } else {
+            Write-Host "ModLoader releases lookup failed. Falling back."
+          }
+
+          if (-not $resolved) {
+            $resolved = "$env:FALLBACK_MODLOADER_VERSION"
+            Write-Host "Using fallback MODLOADER_VERSION: $resolved"
+          }
+          Write-Host "Resolved ModLoader version: $resolved"
+          echo "MODLOADER_VERSION=$resolved" >> $env:GITHUB_OUTPUT
 
           # Standalone DLL
           $dllSrc = "$ws\bin\x64\Client Release\plugins\$name.dll"
@@ -126,5 +169,5 @@ jobs:
           file_group_id: ${{ vars.NEXUSMODS_FILE_GROUP_ID }}
           filename: ${{ steps.assets.outputs.ZIP_PATH }}
           display_name: "TimerMod ${{ env.RELEASE_TAG }}"
-          description: "Supporting release ${{ steps.assets.outputs.SDK_TAG }} version of the AlienX Modloader."
+          description: "Supporting release AlienX ModLoader ${{ steps.assets.outputs.MODLOADER_VERSION }}."
           version: ${{ steps.assets.outputs.NEXUS_VERSION }}
