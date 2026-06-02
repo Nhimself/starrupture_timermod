@@ -152,10 +152,13 @@ jobs:
           $ws   = $env:GITHUB_WORKSPACE
           $name = "TimerMod"
 
+          # Reference the exact artifacts the assets step produced (ZIP_PATH is exported
+          # there) rather than reconstructing filenames from $tag, so the two steps can
+          # never disagree on the name.
           $assets = @(
             "$ws\$name-Client.dll",
             "$ws\$name-client-manifest.json",
-            "$ws\$name-Client-$tag.zip"
+            "${{ steps.assets.outputs.ZIP_PATH }}"
           )
 
           gh release create $tag @assets `
