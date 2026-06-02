@@ -81,13 +81,13 @@ jobs:
             $releases = $relJson | ConvertFrom-Json
             $hits = @()
             foreach ($rel in $releases) {
-              $tag = $rel.tag_name
+              $mlTag = $rel.tag_name
               # contents API returns type=submodule + sha (the pinned commit) for a gitlink path
-              $entryJson = gh api "repos/$mlRepo/contents/${sdkPath}?ref=$tag" 2>$null
+              $entryJson = gh api "repos/$mlRepo/contents/${sdkPath}?ref=$mlTag" 2>$null
               if ($LASTEXITCODE -ne 0) { continue }
               $entry = $entryJson | ConvertFrom-Json
               if ($entry.type -eq "submodule" -and $entry.sha -eq $sdkCommit) {
-                $hits += $tag
+                $hits += $mlTag
               }
             }
             $hits = @($hits | Select-Object -Unique)
@@ -109,6 +109,13 @@ jobs:
           }
           Write-Host "Resolved ModLoader version: $resolved"
           echo "MODLOADER_VERSION=$resolved" >> $env:GITHUB_OUTPUT
+
+          # Guard: nothing above should have mutated $tag. If it no longer matches the
+          # release tag, the manifest/zip/download_url would be stamped wrong, so fail
+          # loudly instead of shipping a mislabeled release.
+          if ($tag -ne $env:RELEASE_TAG) {
+            throw "Release tag drift: `$tag is '$tag' but RELEASE_TAG is '$env:RELEASE_TAG'. Aborting."
+          }
 
           # Standalone DLL
           $dllSrc = "$ws\bin\x64\Client Release\plugins\$name.dll"
