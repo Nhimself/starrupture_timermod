@@ -3,49 +3,101 @@
 #include <windows.h>
 #include <cstdint>
 
-// v19: Introduced IPluginSelf.  MIN bumped to 19.
-// v20: Added OnBeforeWorldEndPlay / OnAfterWorldEndPlay.  MIN remains 19.
-// v21: Added IPluginNativePointers.  MIN remains 19.
-// v22: Added IPluginHttpServer (hooks->HttpServer).
-//   Static file route registration (AddRoute/RemoveRoute), raw-request
-//      filter hook (RegisterOnRawRequest/UnregisterOnRawRequest), and
-//  raw-response route registration (AddRawRoute/RemoveRawRoute).
-//      URL scheme: /<pluginName>/<routeName>/...  (case-insensitive).
-//      Static files are served from <exe_dir>\Plugins\<pluginName>\<folderName>\.
-//      Raw-response routes let plugins handle arbitrary URL prefixes and write
-//      any response body + content-type directly (e.g. JSON API endpoints).
-//   Server builds only; nullptr on client/generic builds.
-//      MIN remains 19.
-// v23 - SR Hotfix update 22/04/2026 118961
-// v24: Added scaling/metrics functions to IModLoaderImGui (GetFontSize, GetTextLineHeight,
-//      GetTextLineHeightWithSpacing, GetFrameHeight, GetFrameHeightWithSpacing, CalcTextSize,
-//      SetWindowFontScale, GetContentRegionAvail, GetDisplaySize).
-//      Added PluginWindowHints struct and windowHints field to PluginWidgetDesc.
-//      MIN remains 23.
-// v31: Added extra_window_flags to PluginWindowHints.
-//      Allows plugins to pass additional ImGuiWindowFlags (e.g. NoTitleBar, NoResize).
-//      0 = no extra flags (default behaviour unchanged). MIN remains 26.
-// v32: Added IPluginClientSessionInfo (client only, null on server/generic).
-//      Exposes GetSessionOnlineMode, IsMultiplayer, IsServer query functions.
-// v33: Added pluginTarget field to PluginInfo. Every plugin must now declare
-//      PLUGIN_TARGET_CLIENT or PLUGIN_TARGET_SERVER. The loader rejects plugins
-//      that don't match the current build target.
-// v34: Game had an update, needed interface bump. MIN bumped to 34.
-#define PLUGIN_INTERFACE_VERSION_MIN 34
-#define PLUGIN_INTERFACE_VERSION_MAX 34
-#define PLUGIN_INTERFACE_VERSION PLUGIN_INTERFACE_VERSION_MAX
+
+// v34: Game had an update, needed interface bump
+// v35: Added layout/sidebar functions to IModLoaderImGui:
+//      BeginChild, EndChild, PushStyleColor, PopStyleColor,
+//      PushStyleVarFloat, PushStyleVarVec2, PopStyleVar,
+//      PushItemWidth, PopItemWidth, SetCursorPosX, GetCursorPosX,
+//      BeginTable, TableNextColumn, EndTable, IsItemClicked,
+//      GetWindowWidth, GetWindowHeight, Dummy.
+//      Also wired SetWindowFontScale which was declared but not populated.
+//      MIN remains 34.
+//      -- Mass expansion of IModLoaderImGui — added ~100 additional ImGui
+//      functions covering: window queries, scroll, groups, extended cursor
+//      control, all drag/slider variants, listbox, tab bar, menus, popups,
+//      tooltips, full table API, item state predicates, disabled regions,
+//      clip rect, mouse queries, color utilities, and misc helpers.
+//      MIN remains 34.
+//      --- Added MakeTextKey to IPluginTextUtils (trampoline for FTextKey::FTextKey),
+//      letting plugins build the Namespace/Key FTextKey arguments required by
+//      AsLocalizable_Advanced.  MIN remains 34.
+// v36: Replaced IPluginClientSessionInfo with IPluginNetModeInfo (server + client,
+//      null on generic). The old offset-based UCrSessionSubsystem reads were
+//      replaced with an AOB-resolved trampoline to AActor::InternalGetNetMode,
+//      exposed via the new EPluginNetMode enum (mirrors engine ENetMode) so
+//      plugins can compare against typed names instead of raw integers.
+//      MIN should be bumped, but no one is using it yet.
+//      --- Added object/package lookup address resolvers to IPluginEngineEvents:
+//      GetStaticFindObjectByPathAddress, GetStaticFindObjectByNameAddress,
+//      GetStaticFindObjectSafeByPathAddress, GetStaticFindObjectSafeByNameAddress,
+//      GetStaticFindObjectFastAddress, GetFindPackageAddress,
+//      GetPackageFullyLoadAddress, GetLoadPackageAddress,
+//      GetAssetDataFastGetAssetAddress -- AOB-resolved during early modloader
+//      startup (Hooks::ObjectLookup), exposed as raw trampoline addresses.
+//      MIN remains 34.
+// v37: Added IPluginImGuiTextures (client only, null on server/generic).
+//      Lets plugins load images from file or memory (WIC: PNG/JPG/BMP/GIF/TIFF),
+//      from raw RGBA pixels, or directly from a live SDK::UTexture2D*, and render
+//      them via Image/ImageButton without any direct D3D12 access.
+//      Up to 64 textures may be live at once.
+//      hooks->ImGuiTextures->{LoadFromFile, LoadFromMemory, LoadFromRGBA,
+//      LoadFromUTexture2D, FreeTexture, GetSize, Image, ImageButton}.
+//      LoadFromUTexture2D copies the engine texture to a modloader-owned resource.
+//      MIN remains 34.
+// v38: IPluginImGuiTextures: raised texture slot cap 64 -> 2048.
+//      Added GetFreeSlotCount(), GetCapacity().
+//      Load functions now throw std::out_of_range when all slots are in use
+//      (previously returned nullptr silently).
+//      LoadFromUTexture2D now gates on FD3D12Resource::DefaultResourceState --
+//      returns nullptr (without throwing) when streaming is still in flight.
+//      Image/ImageButton silently skip rendering if the engine resource is not
+//      yet in a shader-readable state (same check, re-evaluated each draw call).
+//      MIN remains 34.
+// v39: All Load* functions now take a mandatory name parameter (const char*).
+//      The name is logged when the texture is rendered and on load errors to
+//      make it easier to identify which texture is causing problems.
+//      LoadFromUTexture2D now copies the engine texture to a modloader-owned
+//      resource, so the handle survives engine GC/eviction.  Plugins must call
+//      FreeTexture when done; handles are no longer auto-expired each frame.
+//      MIN remains 34.
+// v40: Added IPluginSplash (client only, null on server/generic).
+//      Lets plugins push status messages and progress updates to the startup
+//      splash window during PluginInit, giving users feedback when a plugin
+//      takes several seconds to initialise.
+//      hooks->Splash->{SetStatus, SetProgress, SetSubStatus, SetSubProgress, ClearSubBar}.
+//      All text parameters are UTF-8 const char* (converted to wchar internally).
+//      Safe to call from PluginInit; no-ops on server/generic builds.
+//      MIN remains 34.
+// v41: Added AcquireSplashHold / ReleaseSplashHold to IPluginSplash.
+//      Lets plugins that PostToGameThread during PluginInit keep the splash
+//      open until the async work completes.  Call AcquireSplashHold before
+//      returning from PluginInit, then ReleaseSplashHold when the game-thread
+//      callback finishes.  The init thread waits up to 30 s for all holds to
+//      drain before closing the splash.  Safe to call from any thread.
+//      MIN remains 34.
+// v42: Needed version bump as game updated
+
+#define PLUGIN_INTERFACE_VERSION_MIN 42
+#define PLUGIN_INTERFACE_VERSION_MAX 42
+#define PLUGIN_INTERFACE_VERSION 42
 
 enum class PluginLogLevel { Trace = 0, Debug = 1, Info = 2, Warn = 3, Error = 4 };
 enum class ConfigValueType { String, Integer, Float, Boolean, Keybind };
 
-// Session online mode — mirrors ECrOnlineSessionMode / ECommonSessionOnlineMode from the game.
-// Offline = solo/standalone, LAN/Online = multiplayer session.
-enum class EPluginSessionOnlineMode : uint8_t
+// Network mode — mirrors the engine's ENetMode enum, letting plugins compare
+// against nicely-typed names instead of raw integers when querying GetNetMode().
+//   Standalone      = solo/offline, no networking
+//   DedicatedServer = headless server, no local players
+//   ListenServer    = server with a local player
+//   Client          = connected to a remote server
+enum class EPluginNetMode : uint8_t
 {
-    Offline = 0,
-    LAN     = 1,
-    Online  = 2,
-    Unknown = 255
+    Standalone      = 0,
+    DedicatedServer = 1,
+    ListenServer    = 2,
+    Client          = 3,
+    Unknown         = 255
 };
 
 struct ConfigEntry
@@ -102,7 +154,7 @@ struct IPluginScanner
 };
 
 typedef void* HookHandle;
-namespace SDK { class UWorld; }
+namespace SDK { class UWorld; class UTexture2D; }
 
 // ---------------------------------------------------------------------------
 // Callback typedefs (v14+)
@@ -160,6 +212,29 @@ struct IPluginEngineEvents
 	void    (*UnregisterOnTick)(PluginEngineTickCallback);
 	uintptr_t (*GetStaticLoadObjectAddress)();           // v16
 	void      (*PostToGameThread)(PluginGameThreadCallback fn, void* context); // v18
+
+	// v36 -- resolved addresses of CoreUObject object/package lookup and loading
+	// functions, scanned during early modloader startup. Each returns 0 if the
+	// AOB scan failed to resolve the function on the running build.
+	//
+	//   GetStaticFindObjectByPathAddress     -> UObject* __fastcall StaticFindObject(UClass*, FTopLevelAssetPath*, bool)
+	//   GetStaticFindObjectByNameAddress     -> UObject* __fastcall StaticFindObject(UClass*, UObject*, const wchar_t*, bool)
+	//   GetStaticFindObjectSafeByPathAddress -> UObject* __fastcall StaticFindObjectSafe(UClass*, FTopLevelAssetPath*, bool)
+	//   GetStaticFindObjectSafeByNameAddress -> UObject* __fastcall StaticFindObjectSafe(UClass*, UObject*, const wchar_t*, bool)
+	//   GetStaticFindObjectFastAddress       -> UObject* __fastcall StaticFindObjectFast(UClass*, UObject*, FName, bool, EObjectFlags, EInternalObjectFlags)
+	//   GetFindPackageAddress                -> UPackage* __fastcall FindPackage(UObject*, const wchar_t*)
+	//   GetPackageFullyLoadAddress           -> void __fastcall UPackage::FullyLoad(UPackage*)
+	//   GetLoadPackageAddress                -> UPackage* __fastcall LoadPackage(UPackage*, FScriptContainerElement*, unsigned int, FArchive*, const FLinkerInstancingContext*)
+	//   GetAssetDataFastGetAssetAddress      -> UObject* __fastcall FAssetData::FastGetAsset(FAssetData*, bool, TMap<FName,FName,FDefaultSetAllocator,TDefaultMapHashableKeyFuncs<FName,FName,0>>*)
+	uintptr_t (*GetStaticFindObjectByPathAddress)();
+	uintptr_t (*GetStaticFindObjectByNameAddress)();
+	uintptr_t (*GetStaticFindObjectSafeByPathAddress)();
+	uintptr_t (*GetStaticFindObjectSafeByNameAddress)();
+	uintptr_t (*GetStaticFindObjectFastAddress)();
+	uintptr_t (*GetFindPackageAddress)();
+	uintptr_t (*GetPackageFullyLoadAddress)();
+	uintptr_t (*GetLoadPackageAddress)();
+	uintptr_t (*GetAssetDataFastGetAssetAddress)();
 };
 
 struct IPluginWorldEvents
@@ -325,9 +400,326 @@ struct IModLoaderImGui
 	// Content / display size queries
 	void  (*GetContentRegionAvail)(float* out_x, float* out_y);
 	void  (*GetDisplaySize)(float* out_x, float* out_y);
+
+	// v35: Child windows
+	bool (*BeginChild)(const char* id, float size_x, float size_y, bool border);
+	void (*EndChild)();
+
+	// v35: Style color / var stack
+	void (*PushStyleColor)(int idx, float r, float g, float b, float a);
+	void (*PopStyleColor)(int count);
+	void (*PushStyleVarFloat)(int idx, float val);
+	void (*PushStyleVarVec2)(int idx, float x, float y);
+	void (*PopStyleVar)(int count);
+
+	// v35: Item width / cursor control
+	void  (*PushItemWidth)(float item_width);
+	void  (*PopItemWidth)();
+	void  (*SetCursorPosX)(float x);
+	float (*GetCursorPosX)();
+
+	// v35: Table layout
+	bool (*BeginTable)(const char* id, int columns, int flags);
+	void (*TableNextColumn)();
+	void (*EndTable)();
+
+	// v35: Misc queries
+	bool  (*IsItemClicked)(int mouse_button);
+	float (*GetWindowWidth)();
+	float (*GetWindowHeight)();
+	void  (*Dummy)(float size_x, float size_y);
+
+	// -------------------------------------------------------------------------
+	// v36: Window queries
+	// -------------------------------------------------------------------------
+	bool  (*IsWindowAppearing)();
+	bool  (*IsWindowCollapsed)();
+	bool  (*IsWindowFocused)(int flags);
+	bool  (*IsWindowHovered)(int flags);
+	void  (*GetWindowPos)(float* out_x, float* out_y);
+	void  (*GetWindowSize)(float* out_x, float* out_y);
+	void  (*SetNextWindowBgAlpha)(float alpha);
+
+	// v36: Scroll
+	float (*GetScrollX)();
+	float (*GetScrollY)();
+	void  (*SetScrollX)(float scroll_x);
+	void  (*SetScrollY)(float scroll_y);
+	float (*GetScrollMaxX)();
+	float (*GetScrollMaxY)();
+	void  (*SetScrollHereX)(float center_x_ratio);
+	void  (*SetScrollHereY)(float center_y_ratio);
+
+	// v36: Grouping / alignment
+	void  (*BeginGroup)();
+	void  (*EndGroup)();
+	void  (*AlignTextToFramePadding)();
+
+	// v36: Extended cursor control
+	float (*GetCursorPosY)();
+	void  (*SetCursorPosY)(float y);
+	void  (*SetCursorPos)(float x, float y);
+	void  (*GetCursorScreenPos)(float* out_x, float* out_y);
+	void  (*SetCursorScreenPos)(float x, float y);
+	void  (*GetCursorStartPos)(float* out_x, float* out_y);
+	float (*CalcItemWidth)();
+	void  (*PushTextWrapPos)(float wrap_local_pos_x);
+	void  (*PopTextWrapPos)();
+
+	// v36: Style extras (PushStyleVarX/Y from ImGui 1.87+)
+	void  (*PushStyleVarX)(int idx, float val_x);
+	void  (*PushStyleVarY)(int idx, float val_y);
+	void  (*PushItemFlag)(int option, bool enabled);
+	void  (*PopItemFlag)();
+
+	// v36: Text helpers
+	void  (*BulletText)(const char* text);
+	void  (*Bullet)();
+
+	// v36: Buttons / widgets
+	bool  (*ButtonSized)(const char* label, float w, float h);
+	bool  (*InvisibleButton)(const char* str_id, float w, float h);
+	bool  (*ArrowButton)(const char* str_id, int dir);
+	bool  (*RadioButton)(const char* label, bool active);
+	bool  (*RadioButtonInt)(const char* label, int* v, int v_button);
+	void  (*ProgressBar)(float fraction, float w, float h, const char* overlay);
+	bool  (*CheckboxFlagsInt)(const char* label, int* flags, int flags_value);
+	bool  (*SelectableFull)(const char* label, bool selected, int flags, float w, float h);
+	bool  (*TextLink)(const char* label);
+
+	// v36: Input extras
+	bool  (*InputTextMultiline)(const char* label, char* buf, size_t buf_size, float w, float h);
+	bool  (*InputTextWithHint)(const char* label, const char* hint, char* buf, size_t buf_size);
+	bool  (*InputFloat2)(const char* label, float v[2]);
+	bool  (*InputFloat3)(const char* label, float v[3]);
+	bool  (*InputFloat4)(const char* label, float v[4]);
+	bool  (*InputInt2)(const char* label, int v[2]);
+	bool  (*InputInt3)(const char* label, int v[3]);
+	bool  (*InputInt4)(const char* label, int v[4]);
+
+	// v36: Drag widgets
+	bool  (*DragFloat)(const char* label, float* v, float v_speed, float v_min, float v_max, const char* format);
+	bool  (*DragFloat2)(const char* label, float v[2], float v_speed, float v_min, float v_max, const char* format);
+	bool  (*DragFloat3)(const char* label, float v[3], float v_speed, float v_min, float v_max, const char* format);
+	bool  (*DragFloat4)(const char* label, float v[4], float v_speed, float v_min, float v_max, const char* format);
+	bool  (*DragInt)(const char* label, int* v, float v_speed, int v_min, int v_max, const char* format);
+	bool  (*DragInt2)(const char* label, int v[2], float v_speed, int v_min, int v_max, const char* format);
+	bool  (*DragInt3)(const char* label, int v[3], float v_speed, int v_min, int v_max, const char* format);
+	bool  (*DragInt4)(const char* label, int v[4], float v_speed, int v_min, int v_max, const char* format);
+	bool  (*DragFloatRange2)(const char* label, float* v_min, float* v_max, float speed, float mn, float mx, const char* format);
+	bool  (*DragIntRange2)(const char* label, int* v_min, int* v_max, float speed, int mn, int mx, const char* format);
+
+	// v36: Vertical sliders + angle slider
+	bool  (*VSliderFloat)(const char* label, float w, float h, float* v, float v_min, float v_max, const char* format);
+	bool  (*VSliderInt)(const char* label, float w, float h, int* v, int v_min, int v_max, const char* format);
+	bool  (*SliderAngle)(const char* label, float* v_rad, float deg_min, float deg_max);
+
+	// v36: Color pickers / button
+	bool  (*ColorPicker3)(const char* label, float col[3]);
+	bool  (*ColorPicker4)(const char* label, float col[4]);
+	bool  (*ColorButton)(const char* desc_id, float r, float g, float b, float a, float w, float h);
+
+	// v36: Plot
+	void  (*PlotLines)(const char* label, const float* values, int values_count, int values_offset, const char* overlay, float scale_min, float scale_max, float graph_w, float graph_h);
+	void  (*PlotHistogram)(const char* label, const float* values, int values_count, int values_offset, const char* overlay, float scale_min, float scale_max, float graph_w, float graph_h);
+
+	// v36: Tree extras
+	bool  (*TreeNodeExStr)(const char* label, int flags);
+	void  (*TreePushStr)(const char* str_id);
+	float (*GetTreeNodeToLabelSpacing)();
+	void  (*SetNextItemOpen)(bool is_open, int cond);
+
+	// v36: Listbox
+	bool  (*BeginListBox)(const char* label, float w, float h);
+	void  (*EndListBox)();
+
+	// v36: Tab bar
+	bool  (*BeginTabBar)(const char* str_id, int flags);
+	void  (*EndTabBar)();
+	bool  (*BeginTabItem)(const char* label, bool* p_open, int flags);
+	void  (*EndTabItem)();
+	bool  (*TabItemButton)(const char* label, int flags);
+
+	// v36: Menu bar / menus / menu items
+	bool  (*BeginMenuBar)();
+	void  (*EndMenuBar)();
+	bool  (*BeginMenu)(const char* label, bool enabled);
+	void  (*EndMenu)();
+	bool  (*MenuItem)(const char* label, const char* shortcut, bool selected, bool enabled);
+
+	// v36: Popups
+	bool  (*BeginPopup)(const char* str_id, int flags);
+	bool  (*BeginPopupModal)(const char* name, bool* p_open, int flags);
+	void  (*EndPopup)();
+	void  (*OpenPopup)(const char* str_id, int popup_flags);
+	void  (*CloseCurrentPopup)();
+	bool  (*BeginPopupContextItem)(const char* str_id, int popup_flags);
+	bool  (*BeginPopupContextWindow)(const char* str_id, int popup_flags);
+	bool  (*IsPopupOpen)(const char* str_id, int flags);
+
+	// v36: Tooltips
+	bool  (*BeginTooltip)();
+	void  (*EndTooltip)();
+	bool  (*BeginItemTooltip)();
+	void  (*SetItemTooltip)(const char* text);
+
+	// v36: Table extras
+	void  (*TableNextRow)(int row_flags, float min_row_height);
+	bool  (*TableSetColumnIndex)(int column_n);
+	void  (*TableSetupColumn)(const char* label, int flags, float init_width);
+	void  (*TableSetupScrollFreeze)(int cols, int rows);
+	void  (*TableHeadersRow)();
+	void  (*TableHeader)(const char* label);
+	int   (*TableGetColumnCount)();
+	int   (*TableGetColumnIndex)();
+	int   (*TableGetRowIndex)();
+	const char* (*TableGetColumnName)(int column_n);
+	void  (*TableSetBgColor)(int target, unsigned int color, int column_n);
+
+	// v36: Item state predicates
+	bool  (*IsItemActive)();
+	bool  (*IsItemFocused)();
+	bool  (*IsItemVisible)();
+	bool  (*IsItemEdited)();
+	bool  (*IsItemActivated)();
+	bool  (*IsItemDeactivated)();
+	bool  (*IsItemDeactivatedAfterEdit)();
+	bool  (*IsItemToggledOpen)();
+	bool  (*IsAnyItemHovered)();
+	bool  (*IsAnyItemActive)();
+	bool  (*IsAnyItemFocused)();
+	void  (*GetItemRectMin)(float* out_x, float* out_y);
+	void  (*GetItemRectMax)(float* out_x, float* out_y);
+	void  (*GetItemRectSize)(float* out_x, float* out_y);
+	void  (*SetItemDefaultFocus)();
+	void  (*SetKeyboardFocusHere)(int offset);
+	void  (*SetNextItemAllowOverlap)();
+
+	// v36: Disabled regions
+	void  (*BeginDisabled)(bool disabled);
+	void  (*EndDisabled)();
+
+	// v36: Clip rect
+	void  (*PushClipRect)(float min_x, float min_y, float max_x, float max_y, bool intersect_current);
+	void  (*PopClipRect)();
+
+	// v36: Mouse queries
+	bool  (*IsMouseDown)(int button);
+	bool  (*IsMouseClicked)(int button, bool repeat);
+	bool  (*IsMouseReleased)(int button);
+	bool  (*IsMouseDoubleClicked)(int button);
+	void  (*GetMousePos)(float* out_x, float* out_y);
+	bool  (*IsMouseDragging)(int button, float lock_threshold);
+	void  (*GetMouseDragDelta)(int button, float lock_threshold, float* out_x, float* out_y);
+	void  (*ResetMouseDragDelta)(int button);
+	void  (*SetMouseCursor)(int cursor_type);
+	bool  (*IsMouseHoveringRect)(float min_x, float min_y, float max_x, float max_y, bool clip);
+
+	// v36: Color utilities
+	unsigned int (*GetColorU32FromCol)(int idx, float alpha_mul);
+	unsigned int (*GetColorU32FromVec4)(float r, float g, float b, float a);
+	void         (*GetStyleColorVec4)(int idx, float* out_r, float* out_g, float* out_b, float* out_a);
+	void         (*ColorConvertRGBtoHSV)(float r, float g, float b, float* out_h, float* out_s, float* out_v);
+	void         (*ColorConvertHSVtoRGB)(float h, float s, float v, float* out_r, float* out_g, float* out_b);
+
+	// v36: Misc
+	double        (*GetTime)();
+	int           (*GetFrameCount)();
+	bool          (*IsRectVisible)(float w, float h);
+	const char*   (*GetClipboardText)();
+	void          (*SetClipboardText)(const char* text);
+	const char*   (*GetStyleColorName)(int idx);
 };
 
 typedef void (*PluginImGuiRenderCallback)(IModLoaderImGui* imgui);
+
+// ---------------------------------------------------------------------------
+// Texture API (v37, client only)
+// ---------------------------------------------------------------------------
+
+// Opaque handle returned by the texture load functions. NULL = invalid/failed.
+typedef void* PluginTextureHandle;
+
+// Interface for loading and rendering images without direct D3D12 access.
+// Retrieved via hooks->ImGuiTextures (client only; nullptr on server/generic).
+//
+// THREADING RULES
+// ---------------
+// Load* functions perform a blocking GPU copy and MUST be called from a game-
+// thread callback (OnExperienceLoadComplete, OnWorldBeginPlay, PluginInit, etc.)
+// -- NOT from inside an ImGui render callback.  Calling them from the render
+// thread blocks the GPU pipeline and will cause crashes with Streamline/DLSS.
+//
+// Typical usage pattern:
+//   OnExperienceLoadComplete  ->  handle = LoadFromUTexture2D(tex, "MyTex")
+//   ImGui render callback     ->  Image(handle, w, h)
+//   PluginShutdown            ->  FreeTexture(handle)
+//
+// Image/ImageButton must be called from inside a plugin render callback while
+// an ImGui frame is in progress.  FreeTexture must not be called while the
+// texture may still be in flight on the GPU (i.e. not from the render callback
+// on the same frame you stop using it -- wait one frame or call from game thread).
+//
+// Up to GetCapacity() textures may be live at once.
+// All Load* functions take a mandatory name parameter for log identification.
+// They throw std::out_of_range if no slots are available.
+// They return NULL (without throwing) only when D3D12 is not yet ready or
+// when the specific resource cannot be loaded (bad file, null pointer, etc.).
+// Call GetFreeSlotCount() before loading if you need to avoid the exception.
+struct IPluginImGuiTextures
+{
+    // Load from a UTF-8 file path. Supports PNG, JPG, BMP, GIF, TIFF (via WIC).
+    // Blocks the calling thread until the GPU upload completes.
+    // Call from a game-thread callback, not from a render callback.
+    // Returns NULL if D3D12 is not ready yet or if decoding fails.
+    // Throws std::out_of_range if all slots are in use.
+    PluginTextureHandle (*LoadFromFile)(const char* utf8_path, const char* name);
+
+    // Load from encoded image bytes in memory (same formats as LoadFromFile).
+    // data must remain valid only for the duration of this call.
+    // Blocks the calling thread until the GPU upload completes.
+    // Call from a game-thread callback, not from a render callback.
+    // Throws std::out_of_range if all slots are in use.
+    PluginTextureHandle (*LoadFromMemory)(const void* data, size_t size, const char* name);
+
+    // Load from raw 32-bit RGBA pixels (4 bytes/pixel, top-left row-major).
+    // data must remain valid only for the duration of this call.
+    // Blocks the calling thread until the GPU upload completes.
+    // Call from a game-thread callback, not from a render callback.
+    // Throws std::out_of_range if all slots are in use.
+    PluginTextureHandle (*LoadFromRGBA)(const unsigned char* rgba, int width, int height, const char* name);
+
+    // Copy a UTexture2D into a modloader-owned GPU resource and return a handle.
+    // Blocks the calling thread until the GPU copy completes (~1-50ms).
+    // Call from a game-thread callback (OnExperienceLoadComplete etc.), NOT from
+    // a render callback -- doing so will stall the render thread and crash with DLSS.
+    // The copy is yours to keep; the engine may GC the source freely after this call.
+    // Call FreeTexture when done -- handles persist until explicitly freed.
+    // Returns NULL if D3D12 is not ready or the texture has no GPU resource yet.
+    // Throws std::out_of_range if all slots are in use.
+    PluginTextureHandle (*LoadFromUTexture2D)(SDK::UTexture2D* texture, const char* name);
+
+    // Release the texture and free its slot. Safe to call with NULL.
+    // Do not call while the texture may still be rendered on the GPU.
+    void (*FreeTexture)(PluginTextureHandle handle);
+
+    // Query the texture's natural dimensions. Either out pointer may be NULL.
+    void (*GetSize)(PluginTextureHandle handle, int* out_width, int* out_height);
+
+    // Render the texture at the current ImGui cursor position.
+    // Pass width=0, height=0 to use the texture's natural size.
+    void (*Image)(PluginTextureHandle handle, float width, float height);
+
+    // Clickable image button. Returns true if clicked.
+    // Pass width=0, height=0 to use the texture's natural size.
+    bool (*ImageButton)(const char* str_id, PluginTextureHandle handle, float width, float height);
+
+    // Returns the number of texture slots not currently in use. (v38)
+    int (*GetFreeSlotCount)();
+
+    // Returns the total texture slot capacity. (v38)
+    int (*GetCapacity)();
+};
 
 // Flags for PluginWindowHints::extra_window_flags (v31).
 // Values mirror ImGuiWindowFlags so plugins do not need imgui.h.
@@ -433,6 +825,28 @@ struct IPluginNativePointers
 	uintptr_t (*SpawnerDoSpawning)();
 	uintptr_t (*HUDPostRender)();   // client only (nullptr on server/generic)
 	uintptr_t (*ClientMessageExec)();  // client only (nullptr on server/generic)
+};
+
+// ---------------------------------------------------------------------------
+// Text utilities
+// ---------------------------------------------------------------------------
+struct IPluginTextUtils
+{
+	// Trampoline address of the original FText::AsLocalizable_Advanced, or 0 if the hook
+	// failed to install. Cast to:
+	//   FText*(__fastcall*)(FText* result, const FTextKey* Namespace, const FTextKey* Key, const wchar_t* String)
+	uintptr_t (*AsLocalizable_Advanced)();
+
+	// Resolved native address of SDK::UKismetTextLibrary::Conv_TextToString, or 0 if not found.
+	// Cast to: FString*(__fastcall*)(FString* result, const FText* InText)
+	uintptr_t (*Conv_TextToString)();
+
+	// Trampoline address of the original FTextKey::FTextKey(const wchar_t*), or 0 if the hook
+	// failed to install. Use this to build the Namespace/Key arguments required by
+	// AsLocalizable_Advanced -- FTextKey is just an interned-string-table index and cannot
+	// be constructed any other way.
+	// Cast to: void(__fastcall*)(FTextKey* this, const wchar_t* InStr)
+	uintptr_t (*MakeTextKey)();
 };
 
 // ---------------------------------------------------------------------------
@@ -559,20 +973,59 @@ struct IPluginHttpServer
 };
 
 // ---------------------------------------------------------------------------
-// Client session info (v32) — client only, null on server/generic
+// Net mode info (v36) — server + client, null on generic
 // ---------------------------------------------------------------------------
-struct IPluginClientSessionInfo
+struct IPluginNetModeInfo
 {
-    // Returns the current online mode read from UCrSessionSubsystem.
-    // Offline = solo/standalone, LAN or Online = connected to a session.
-    // Returns Unknown if the subsystem is not yet available.
-    EPluginSessionOnlineMode (*GetSessionOnlineMode)();
+    // Returns the current network mode via AActor::InternalGetNetMode, resolved
+    // by AOB scan and invoked directly as a trampoline (no hook/detour).
+    // Returns Unknown if the function could not be resolved or no actor is
+    // available yet to query (e.g. called before world begin play).
+    EPluginNetMode (*GetNetMode)();
 
-    // Convenience: true if GetSessionOnlineMode() != Offline and != Unknown.
+    // Convenience: true if GetNetMode() is ListenServer or Client, i.e. an
+    // active multiplayer session as opposed to a Standalone game.
     bool (*IsMultiplayer)();
 
-    // True when UCrSessionSubsystem::bIsServer is set (i.e. this instance is acting as server).
+    // Convenience: true if GetNetMode() is DedicatedServer or ListenServer.
     bool (*IsServer)();
+};
+
+// ---------------------------------------------------------------------------
+// Splash feedback (v40, client only; null on server/generic)
+// ---------------------------------------------------------------------------
+// Lets plugins push messages and progress to the secondary sub-bar on the
+// startup splash window during PluginInit, giving users feedback when a plugin
+// takes several seconds to initialise.  The main status/progress bar is
+// owned by the modloader.  All text is UTF-8.  Safe to call from any thread.
+struct IPluginSplash
+{
+    // Returns true while the splash window is open and visible.
+    // Guard all other calls with this -- returns false after startup completes
+    // or when the plugin is hot-reloaded after the splash has already closed.
+    bool (*IsVisible)();
+
+    // Update the secondary status label shown below the main progress bar.
+    // Pass an empty string or call ClearSubBar to hide the secondary section.
+    void (*SetSubStatus)(const char* text);
+
+    // Update the secondary progress bar fill (0.0 to 1.0).
+    void (*SetSubProgress)(float fraction);
+
+    // Hide the secondary bar and clear its label.
+    void (*ClearSubBar)();
+
+    // Acquire a hold to keep the splash open past the normal startup close.
+    // Call during PluginInit before PostToGameThread if your async work needs
+    // to update the splash.  You MUST call ReleaseSplashHold exactly once when
+    // that work finishes (or fails).  Holds are ref-counted.  No-op if the
+    // splash is already closed.  Safe to call from any thread.
+    void (*AcquireSplashHold)();
+
+    // Release a hold previously acquired with AcquireSplashHold.  When all
+    // holds are released the splash is allowed to proceed to close.
+    // Safe to call from any thread.
+    void (*ReleaseSplashHold)();
 };
 
 // ---------------------------------------------------------------------------
@@ -593,7 +1046,10 @@ struct IPluginHooks
 	IPluginNetworkChannel* Network;   // v17 — server+client; null on generic
 	IPluginNativePointers* NativePointers; // v21
 	IPluginHttpServer*     HttpServer;     // v22 — server only, null on client/generic
-	IPluginClientSessionInfo* ClientSession; // v32 — client only, null on server/generic
+	IPluginNetModeInfo*    NetMode;          // v36 — server + client; null on generic
+	IPluginTextUtils*      Text;             // FText localization helpers (AsLocalizable_Advanced, Conv_TextToString)
+	IPluginImGuiTextures*  ImGuiTextures;    // v37 — client only; null on server/generic
+	IPluginSplash*         Splash;           // v40 — client only; null on server/generic
 };
 
 // ---------------------------------------------------------------------------
