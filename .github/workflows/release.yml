@@ -176,7 +176,7 @@ jobs:
         uses: Nexus-Mods/upload-action@main
         with:
           api_key: ${{ secrets.NEXUSMODS_API_KEY }}
-          file_group_id: ${{ vars.NEXUSMODS_FILE_GROUP_ID }}
+          file_id: ${{ vars.NEXUSMODS_FILE_GROUP_ID }}
           filename: ${{ steps.assets.outputs.ZIP_PATH }}
           display_name: "TimerMod ${{ env.RELEASE_TAG }}"
           description: "Supporting release AlienX ModLoader ${{ steps.assets.outputs.MODLOADER_VERSION }}."
