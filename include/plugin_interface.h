@@ -3,7 +3,33 @@
 #include <windows.h>
 #include <cstdint>
 
-
+// v19: Introduced IPluginSelf.  MIN bumped to 19.
+// v20: Added OnBeforeWorldEndPlay / OnAfterWorldEndPlay.  MIN remains 19.
+// v21: Added IPluginNativePointers.  MIN remains 19.
+// v22: Added IPluginHttpServer (hooks->HttpServer).
+//   Static file route registration (AddRoute/RemoveRoute), raw-request
+//      filter hook (RegisterOnRawRequest/UnregisterOnRawRequest), and
+//  raw-response route registration (AddRawRoute/RemoveRawRoute).
+//      URL scheme: /<pluginName>/<routeName>/...  (case-insensitive).
+//      Static files are served from <exe_dir>\Plugins\<pluginName>\<folderName>\.
+//      Raw-response routes let plugins handle arbitrary URL prefixes and write
+//      any response body + content-type directly (e.g. JSON API endpoints).
+//   Server builds only; nullptr on client/generic builds.
+//      MIN remains 19.
+// v23 - SR Hotfix update 22/04/2026 118961
+// v24: Added scaling/metrics functions to IModLoaderImGui (GetFontSize, GetTextLineHeight,
+//      GetTextLineHeightWithSpacing, GetFrameHeight, GetFrameHeightWithSpacing, CalcTextSize,
+//      SetWindowFontScale, GetContentRegionAvail, GetDisplaySize).
+//      Added PluginWindowHints struct and windowHints field to PluginWidgetDesc.
+//      MIN remains 23.
+// v31: Added extra_window_flags to PluginWindowHints.
+//      Allows plugins to pass additional ImGuiWindowFlags (e.g. NoTitleBar, NoResize).
+//      0 = no extra flags (default behaviour unchanged). MIN remains 26.
+// v32: Added IPluginClientSessionInfo (client only, null on server/generic).
+//      Exposes GetSessionOnlineMode, IsMultiplayer, IsServer query functions.
+// v33: Added pluginTarget field to PluginInfo. Every plugin must now declare
+//      PLUGIN_TARGET_CLIENT or PLUGIN_TARGET_SERVER. The loader rejects plugins
+//      that don't match the current build target.
 // v34: Game had an update, needed interface bump
 // v35: Added layout/sidebar functions to IModLoaderImGui:
 //      BeginChild, EndChild, PushStyleColor, PopStyleColor,
@@ -77,10 +103,42 @@
 //      drain before closing the splash.  Safe to call from any thread.
 //      MIN remains 34.
 // v42: Needed version bump as game updated
+// v43: Added IPluginUIEvents::RegisterOnPanelWindowClosed /
+//      UnregisterOnPanelWindowClosed -- fires PluginPanelClosedCallback(handle)
+//      when a panel window is closed, either via the ImGui titlebar X button
+//      or via a plugin calling SetPanelClose.
+//      Added IPluginUIEvents::AcquireInputCapture / ReleaseInputCapture --
+//      lets any plugin request that the modloader suppress game mouse/
+//      keyboard input (same as while a panel/modloader window is open),
+//      independent of panel/widget state. Reference-counted via opaque
+//      tokens; input stays suppressed until every acquired token is released.
+//      MIN remains 42 (additive fields appended to IPluginUIEvents).
+// v44: Added IPluginCraftingEvents (hooks->Crafting) -- RegisterOnCraftingFinished /
+//      UnregisterOnCraftingFinished, fired by ACrCrafter::NativeOnItemCraftingComplete
+//      (AOB-resolved native signal handler, not a UFUNCTION) whenever any crafting
+//      building (Crafter, Forge, Refinery, Factory, Assembler, Exporter,
+//      FoodProcessor, ItemPrinter, etc.) finishes crafting an item. Callback
+//      receives the ACrCrafter* (as void*), its UCrCraftingComponent* (as void*,
+//      may be null), and the crafter's FMassEntityHandle Index/SerialNumber.
+//      Added CraftingFinished() to IPluginNativePointers (appended at end).
+//      hooks->Crafting is appended at the end of IPluginHooks (not inserted
+//      in the middle) to preserve struct layout for v42/v43 plugins.
+//      MIN remains 42.
+// v45: IPluginImGuiTextures texture slot cap raised 2048 -> 4096.
+//      Textures are now shared and refcounted by name (case-insensitive):
+//      if Load* is called with a name that matches an already-loaded,
+//      in-use texture, the existing GPU resource is reused and its
+//      refcount is incremented instead of creating a new copy. Each
+//      successful Load* call must be paired with exactly one FreeTexture
+//      call; the underlying resource is only released once the refcount
+//      reaches zero. Plugins sharing a texture name must ensure the
+//      underlying image data is identical -- the first registration wins.
+//      MIN remains 42.
+// v46: New game update, min/max bump
 
-#define PLUGIN_INTERFACE_VERSION_MIN 42
-#define PLUGIN_INTERFACE_VERSION_MAX 42
-#define PLUGIN_INTERFACE_VERSION 42
+#define PLUGIN_INTERFACE_VERSION_MIN 46
+#define PLUGIN_INTERFACE_VERSION_MAX 46
+#define PLUGIN_INTERFACE_VERSION 46
 
 enum class PluginLogLevel { Trace = 0, Debug = 1, Info = 2, Warn = 3, Error = 4 };
 enum class ConfigValueType { String, Integer, Float, Boolean, Keybind };
@@ -175,6 +233,14 @@ typedef void (*PluginNetworkMessageCallback)(const char* pluginName, const char*
 typedef void (*PluginNetworkServerMessageCallback)(void* senderPlayerController, const char* pluginName, const char* typeTag, const uint8_t* data, size_t size);
 typedef void (*PluginGameThreadCallback)(void* context);
 
+// v44 -- fired whenever any crafting building finishes crafting an item.
+// crafter           : the ACrCrafter* (or subclass) that finished crafting, as void*
+// craftingComponent : the building's UCrCraftingComponent*, as void* (may be null)
+// entityIndex       : FMassEntityHandle::Index for the crafter's Mass entity
+// entitySerial      : FMassEntityHandle::SerialNumber for the crafter's Mass entity
+typedef void (*PluginCraftingFinishedCallback)(void* crafter, void* craftingComponent,
+                                                int32_t entityIndex, int32_t entitySerial);
+
 typedef bool (*PluginBeforeActivateSpawnerCallback)(void* spawner, bool bDisableAggroLock);
 typedef void (*PluginAfterActivateSpawnerCallback)(void* spawner, bool bDisableAggroLock);
 typedef bool (*PluginBeforeDeactivateSpawnerCallback)(void* spawner, bool bPermanently);
@@ -265,6 +331,16 @@ struct IPluginActorEvents
 {
 	void (*RegisterOnActorBeginPlay)(PluginActorBeginPlayCallback);
 	void (*UnregisterOnActorBeginPlay)(PluginActorBeginPlayCallback);
+};
+
+// v44 -- crafting building events.
+struct IPluginCraftingEvents
+{
+	// Fired by ACrCrafter::OnItemCraftingComplete whenever any crafting building
+	// (Crafter, Forge, Refinery, Factory, Assembler, Exporter, FoodProcessor,
+	// ItemPrinter, etc.) finishes crafting an item.
+	void (*RegisterOnCraftingFinished)(PluginCraftingFinishedCallback);
+	void (*UnregisterOnCraftingFinished)(PluginCraftingFinishedCallback);
 };
 
 struct IPluginSpawnerHooks
@@ -666,6 +742,16 @@ typedef void* PluginTextureHandle;
 // They return NULL (without throwing) only when D3D12 is not yet ready or
 // when the specific resource cannot be loaded (bad file, null pointer, etc.).
 // Call GetFreeSlotCount() before loading if you need to avoid the exception.
+//
+// Sharing/refcounting (v45): the name is also used as a sharing key
+// (case-insensitive). If any Load* call is made with a name that matches an
+// already-loaded, in-use texture, the existing GPU resource is reused and its
+// refcount is incremented -- no new slot is consumed and no new GPU work is
+// done. Every successful Load* call (whether it created a new texture or
+// reused an existing one) must be paired with exactly one FreeTexture call;
+// the underlying resource is only released once the refcount drops to zero.
+// If multiple plugins use the same name, they must be referring to the same
+// image -- the first registration's pixel data wins.
 struct IPluginImGuiTextures
 {
     // Load from a UTF-8 file path. Supports PNG, JPG, BMP, GIF, TIFF (via WIC).
@@ -701,6 +787,9 @@ struct IPluginImGuiTextures
 
     // Release the texture and free its slot. Safe to call with NULL.
     // Do not call while the texture may still be rendered on the GPU.
+    // If the texture is shared (loaded by name more than once), this only
+    // decrements its refcount -- the slot is freed once every owner has
+    // called FreeTexture.
     void (*FreeTexture)(PluginTextureHandle handle);
 
     // Query the texture's natural dimensions. Either out pointer may be NULL.
@@ -766,6 +855,11 @@ struct PluginWidgetDesc
 
 typedef void (*PluginConfigChangedCallback)(const char* section, const char* key, const char* newValue);
 
+// v43: Fired when a panel window is closed -- either via the ImGui titlebar
+// X button or via a plugin calling SetPanelClose (e.g. driving its own
+// visibility toggle). handle identifies which panel was closed.
+typedef void (*PluginPanelClosedCallback)(PanelHandle handle);
+
 struct IPluginUIEvents
 {
 	PanelHandle  (*RegisterPanel)(const PluginPanelDesc* desc);
@@ -777,6 +871,21 @@ struct IPluginUIEvents
 	WidgetHandle (*RegisterWidget)(const PluginWidgetDesc* desc);      // v16
 	void      (*UnregisterWidget)(WidgetHandle handle);   // v16
 	void         (*SetWidgetVisible)(WidgetHandle handle, bool visible); // v16
+
+	// v43: Notified whenever any panel is closed (X button or SetPanelClose).
+	void (*RegisterOnPanelWindowClosed)(PluginPanelClosedCallback callback);
+	void (*UnregisterOnPanelWindowClosed)(PluginPanelClosedCallback callback);
+
+	// v43: Request that the modloader suppress game mouse/keyboard input,
+	// the same way it does while a panel/modloader window is open. Useful
+	// for plugins driving their UI via RegisterWidget (which does not
+	// trigger capture on its own). Returns an opaque token; input stays
+	// suppressed as long as at least one token (from any plugin) is held.
+	// Always call ReleaseInputCapture for every acquired token, including
+	// during PluginShutdown -- a leaked token permanently suppresses input
+	// until the modloader restarts.
+	void* (*AcquireInputCapture)();
+	void  (*ReleaseInputCapture)(void* token);
 };
 
 struct IPluginHUDEvents
@@ -825,6 +934,10 @@ struct IPluginNativePointers
 	uintptr_t (*SpawnerDoSpawning)();
 	uintptr_t (*HUDPostRender)();   // client only (nullptr on server/generic)
 	uintptr_t (*ClientMessageExec)();  // client only (nullptr on server/generic)
+
+	// v44 -- trampoline address of ACrCrafter::NativeOnItemCraftingComplete.
+	// Cast to: void(__fastcall*)(void* thisPtr, uint64_t entityHandle, uint64_t signalName)
+	uintptr_t (*CraftingFinished)();
 };
 
 // ---------------------------------------------------------------------------
@@ -1050,6 +1163,7 @@ struct IPluginHooks
 	IPluginTextUtils*      Text;             // FText localization helpers (AsLocalizable_Advanced, Conv_TextToString)
 	IPluginImGuiTextures*  ImGuiTextures;    // v37 — client only; null on server/generic
 	IPluginSplash*         Splash;           // v40 — client only; null on server/generic
+	IPluginCraftingEvents* Crafting;       // v44 -- appended at end to preserve layout for v42/v43 plugins
 };
 
 // ---------------------------------------------------------------------------
