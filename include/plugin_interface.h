@@ -135,10 +135,148 @@
 //      underlying image data is identical -- the first registration wins.
 //      MIN remains 42.
 // v46: New game update, min/max bump
+// v47: Added IPluginObjectWalker (hooks->ObjectWalker) -- walks SDK::UObject::
+//      GObjects on demand and lets plugins find objects by class/object name
+//      and invoke a UFunction on one by name via ProcessEvent. On-demand only
+//      (every call walks tens of thousands of GObjects entries synchronously);
+//      there is no hook into UObject construction, so nothing fires live as
+//      objects spawn -- callers must trigger a walk and cache results.
+//      InvokeUFunctionByName/InvokeResolvedUFunction perform no parameter
+//      marshaling: paramsBuffer must already match the target UFunction's
+//      native Params layout, since this SDK dump exposes no params-size field
+//      to validate against. Appended at the end of IPluginHooks to preserve
+//      layout for existing plugins. MIN remains 46.
+//      --- Added IPluginDelegateHook (hooks->Delegate) -- lets a plugin
+//      splice a synthetic UFunction into an existing UE5 multicast delegate
+//      (e.g. SDK::UCrSaveSubsystem::OnAfterSave) and get a parameterless
+//      callback when it broadcasts, without the maintainer hand-writing a
+//      dedicated AOB-scanned hook module for it. Never touches a real
+//      UClass's FuncMap/AllFunctionsCache, so other code resolving the same
+//      function name by name is unaffected. Multiple concurrent hooks,
+//      including several on the same delegate, are supported via opaque
+//      DelegateHookHandle values. Appended at the end of IPluginHooks.
+//      v47 is unreleased, so this and IPluginObjectWalker land in the same
+//      version; MIN remains 46.
+//      --- IPluginObjectWalker reworked while still unreleased (no plugins
+//      built against the visitor-based shape yet): WalkAllObjects /
+//      FindObjectsByClassName / FindObjectsByName replaced with *Into
+//      variants that fill a plugin-owned PluginObjectInfo buffer instead of
+//      invoking a callback -- no allocation crosses the DLL boundary in
+//      either direction. Each takes a PluginObjectLookupMode to filter
+//      CDOs/archetypes out of GObjects without the plugin needing to know
+//      raw EObjectFlags bit values. Return value is the total match count
+//      (may exceed capacity; caller can re-call with a bigger buffer if
+//      truncated). FindFirstObjectByName/InvokeUFunctionByName/
+//      ResolveUFunction/InvokeResolvedUFunction are unchanged.
+//      --- Added IPluginObjectProperties (hooks->ObjectProperties) --
+//      resolves a UPROPERTY/FProperty by class name + property name (walks
+//      the live UClass's ChildProperties + SuperStruct chain), then reads/
+//      writes it through typed accessors (Bool/Int/Float/Object) or a raw
+//      escape hatch (GetPropertyRawPtr). Because FProperty::Offset is looked
+//      up fresh against the running build's reflection metadata every call,
+//      a game update that reshuffles struct layout does not require
+//      touching any plugin that goes through this interface instead of
+//      casting raw SDK structs and reading at a compiled-in offset -- only
+//      the property *name* needs to stay the same.
+//      String/Name properties are read-only (FString/FName own their own
+//      backing storage; writing one in place safely needs the engine's own
+//      allocator, out of scope here). Does not cover plain native C++
+//      members with no UPROPERTY/FProperty entry -- those have no reflection
+//      metadata to look up by name. v47 is unreleased, so this lands in the
+//      same version as IPluginObjectWalker/IPluginDelegateHook above.
+//      Appended at the end of IPluginHooks. MIN remains 46.
+// v48: Added ImDrawList direct-drawing access to IModLoaderImGui (appended at
+//      the end of the struct, so existing v34+ plugins keep working unchanged).
+//      GetWindowDrawList/GetBackgroundDrawList/GetForegroundDrawList return an
+//      opaque PluginDrawList (== ImDrawList*) handle valid for the current
+//      frame only -- do not cache it across frames. Covers shape primitives
+//      (Line, Rect(Filled), RectFilledMultiColor, Quad(Filled),
+//      Triangle(Filled), Circle(Filled), Ngon(Filled), Ellipse(Filled),
+//      Text/TextSized, Polyline, ConvexPolyFilled, BezierCubic/Quadratic),
+//      images via existing PluginTextureHandle (Image, ImageQuad,
+//      ImageRounded), the stateful Path* builder API (PathClear/LineTo/ArcTo/
+//      ArcToFast/EllipticalArcTo/BezierCubicCurveTo/BezierQuadraticCurveTo/
+//      Rect/FillConvex/Stroke), and draw-list-local clip rect stack
+//      (PushClipRect/PushClipRectFullScreen/PopClipRect/GetClipRectMin/Max).
+//      Colors are packed 0xAABBGGRR ImU32 -- build them with the existing
+//      GetColorU32FromVec4/GetColorU32FromCol helpers. MIN remains 46.
+// v49: IPluginUIEvents::RegisterOnConfigChanged/UnregisterOnConfigChanged now
+//      take a leading `const IPluginSelf* self` parameter, matching the
+//      self-first convention already used by IPluginLogger/IPluginConfig.
+//      self is the same pointer received in PluginInit -- pass it straight
+//      through, no plugin-name string needed. The modloader uses it to scope
+//      FireConfigChanged so a plugin's callback only fires for edits to its
+//      own config file, instead of broadcasting every plugin's config
+//      changes to every registered listener. Breaking signature change:
+//      MIN bumped to 49.
 
-#define PLUGIN_INTERFACE_VERSION_MIN 46
-#define PLUGIN_INTERFACE_VERSION_MAX 46
-#define PLUGIN_INTERFACE_VERSION 46
+// v50 - 29/07/2026: Added IPluginDebugDraw, reachable as hooks->HUD->DebugDraw
+//      (client only -- the whole HUD interface is null on server/generic).
+//      Reimplements all sixteen UKismetSystemLibrary::DrawDebug* nodes, which
+//      are dead on this shipping build: ENABLE_DRAW_DEBUG is 0, so every body
+//      compiled away to nothing and only the exec thunks survive, parsing
+//      their parameters off the FFrame and returning without drawing. The
+//      DrawDebugType pin on the trace nodes is inert for the same reason. What
+//      is still alive is the renderer -- UWorld::LineBatchers[4] (all four
+//      NewObject'd and registered by UWorld::UpdateWorldComponents) and
+//      ULineBatchComponent::DrawLines -- so this builds the same geometry and
+//      hands it to the engine's own batchers via a new AOB-scanned hook module
+//      (hooks/game/debug_draw/).
+//      Covers Line, Point, Circle, Sphere, Box, Capsule, Cylinder,
+//      ConeInDegrees, Arrow, CoordinateSystem, Plane, Frustum, Camera (both an
+//      ACameraActor* form and a location/rotation/FOV form), String,
+//      FloatHistoryTransform and FloatHistoryLocation, plus FlushPersistentLines
+//      and ClearAllStrings.
+//      DrawString takes a trailing fontScale (1.0f = the engine's small font at
+//      native size; the engine applies it with no distance falloff). Added
+//      while v50 was still unreleased, so the signature was amended in place
+//      rather than appending a second function -- no plugin has been built
+//      against the earlier shape.
+//      Two primitives deviate from the engine because only DrawLines survived
+//      as an out-of-line function: DrawPoint (engine uses BatchedPoints) is a
+//      three-axis cross, and DrawPlane / the float-history graphs (engine uses
+//      BatchedMeshes) draw outlines instead of filled quads.
+//      Callable from any thread: the batchers are game-thread only, but the
+//      wrappers copy every argument and defer to GameThreadDispatch when the
+//      caller is elsewhere, so drawing from an ImGui panel callback (which
+//      runs on the render thread) just works.
+//      The new field is appended at the end of IPluginHUDEvents and all the
+//      geometry structs are new, so nothing existing shifts: MIN remains 49.
+
+// v51: Added IPluginUIEvents::AcquireInputPassthrough / ReleaseInputPassthrough
+//      -- a cooperative counterpart to the v43 AcquireInputCapture pair.
+//      AcquireInputCapture is all-or-nothing: while a token is held the game
+//      receives no mouse or keyboard input at all. That is right for a modal
+//      settings panel and wrong for an always-on widget UI the player is meant
+//      to keep playing underneath (a timeline editor, a build planner, an
+//      overlay with draggable handles) -- those currently freeze the player out
+//      until the window is closed. A passthrough token instead puts the
+//      modloader in cooperative mode: ImGui is fed every message and draws and
+//      owns the cursor exactly as before, but the game is only cut out of the
+//      input classes ImGui actually wants that frame -- mouse while the cursor
+//      is over an ImGui window or dragging a widget (io.WantCaptureMouse), and
+//      keyboard while a text field has focus (io.WantCaptureKeyboard /
+//      WantTextInput). Everything else, including the WM_INPUT raw-mouse deltas
+//      UE5 uses for camera look, reaches the game untouched.
+//      Exclusive capture always wins: while any modloader window, plugin panel
+//      or v43 capture token is active, passthrough tokens have no effect and
+//      behaviour is exactly what it was before. Tokens are refcounted across
+//      all plugins the same way, and must be released in PluginShutdown.
+//      Appended at the end of IPluginUIEvents, so nothing existing shifts:
+//      MIN remains 49.
+
+// v52: Added IModLoaderImGui::GetMouseWheel / GetMouseWheelH. The v36 mouse
+//      query block covers buttons, position, dragging and hovering but never
+//      exposed the wheel, so a plugin drawing its own scrollable or zoomable
+//      surface (a timeline, a map, a graph) had no way to read it at all --
+//      ImGui consumes the WM_MOUSEWHEEL itself and the plugin never sees the
+//      message. Both return the per-frame delta straight off ImGuiIO, in the
+//      usual ImGui units (one notch = 1.0). Appended at the end of the
+//      function table, which is append-only: MIN remains 49.
+
+#define PLUGIN_INTERFACE_VERSION_MIN 49
+#define PLUGIN_INTERFACE_VERSION_MAX 52
+#define PLUGIN_INTERFACE_VERSION 52
 
 enum class PluginLogLevel { Trace = 0, Debug = 1, Info = 2, Warn = 3, Error = 4 };
 enum class ConfigValueType { String, Integer, Float, Boolean, Keybind };
@@ -240,6 +378,14 @@ typedef void (*PluginGameThreadCallback)(void* context);
 // entitySerial      : FMassEntityHandle::SerialNumber for the crafter's Mass entity
 typedef void (*PluginCraftingFinishedCallback)(void* crafter, void* craftingComponent,
                                                 int32_t entityIndex, int32_t entitySerial);
+
+// v47 -- Hooks::DelegateHook. Splices a synthetic UFunction into an existing
+// UE5 TMulticastInlineDelegate<...> (any arity) without touching any real
+// UClass's FuncMap/AllFunctionsCache, so other code resolving the same
+// function name by name is never affected. Deliberately parameterless --
+// see IPluginDelegateHook below.
+typedef uint64_t DelegateHookHandle;
+typedef void (*PluginDelegateCallback)(void* userContext);
 
 typedef bool (*PluginBeforeActivateSpawnerCallback)(void* spawner, bool bDisableAggroLock);
 typedef void (*PluginAfterActivateSpawnerCallback)(void* spawner, bool bDisableAggroLock);
@@ -421,6 +567,32 @@ struct IPluginInputEvents
 	void (*RegisterKeybindCombo)(EModKey key, EModKeyModifiers mods, EModKeyEvent event, PluginKeybindComboCallback callback);
 	void (*UnregisterKeybindCombo)(EModKey key, EModKeyModifiers mods, EModKeyEvent event, PluginKeybindComboCallback callback);
 };
+
+// Opaque handle for a texture registered through IPluginImGuiTextures (v37).
+// Forward-declared here (fully defined again, identically, near
+// IPluginImGuiTextures below) so IModLoaderImGui's draw-list Image* functions
+// can take one without reordering the whole header.
+typedef void* PluginTextureHandle;
+
+// Opaque handle for an ImDrawList*, returned by GetWindowDrawList /
+// GetBackgroundDrawList / GetForegroundDrawList (v48). Only valid for the
+// duration of the current frame's render callback -- do not cache across
+// frames.
+typedef void* PluginDrawList;
+
+// Flags for the rounding-corner parameters below. Mirrors ImDrawFlags.
+#define PluginDrawFlags_None                     0
+#define PluginDrawFlags_Closed                    (1 << 0)
+#define PluginDrawFlags_RoundCornersTopLeft        (1 << 4)
+#define PluginDrawFlags_RoundCornersTopRight        (1 << 5)
+#define PluginDrawFlags_RoundCornersBottomLeft      (1 << 6)
+#define PluginDrawFlags_RoundCornersBottomRight     (1 << 7)
+#define PluginDrawFlags_RoundCornersNone           (1 << 8)
+#define PluginDrawFlags_RoundCornersTop            (PluginDrawFlags_RoundCornersTopLeft | PluginDrawFlags_RoundCornersTopRight)
+#define PluginDrawFlags_RoundCornersBottom         (PluginDrawFlags_RoundCornersBottomLeft | PluginDrawFlags_RoundCornersBottomRight)
+#define PluginDrawFlags_RoundCornersLeft           (PluginDrawFlags_RoundCornersBottomLeft | PluginDrawFlags_RoundCornersTopLeft)
+#define PluginDrawFlags_RoundCornersRight          (PluginDrawFlags_RoundCornersBottomRight | PluginDrawFlags_RoundCornersTopRight)
+#define PluginDrawFlags_RoundCornersAll            (PluginDrawFlags_RoundCornersTopLeft | PluginDrawFlags_RoundCornersTopRight | PluginDrawFlags_RoundCornersBottomLeft | PluginDrawFlags_RoundCornersBottomRight)
 
 // ---------------------------------------------------------------------------
 // UI (v15–v16, client only; extended v24)
@@ -705,6 +877,79 @@ struct IModLoaderImGui
 	const char*   (*GetClipboardText)();
 	void          (*SetClipboardText)(const char* text);
 	const char*   (*GetStyleColorName)(int idx);
+
+	// -------------------------------------------------------------------------
+	// v48: Direct drawing (ImDrawList)
+	// -------------------------------------------------------------------------
+	// Acquire a draw list. Only valid for the current frame's render callback --
+	// do not cache the returned handle across frames.
+	PluginDrawList (*GetWindowDrawList)();
+	PluginDrawList (*GetBackgroundDrawList)();
+	PluginDrawList (*GetForegroundDrawList)();
+
+	// Shape primitives. Colors are packed 0xAABBGGRR ImU32 (see
+	// GetColorU32FromVec4 / GetColorU32FromCol above).
+	void (*DL_AddLine)(PluginDrawList dl, float x1, float y1, float x2, float y2, unsigned int col, float thickness);
+	void (*DL_AddRect)(PluginDrawList dl, float min_x, float min_y, float max_x, float max_y, unsigned int col, float rounding, int flags, float thickness);
+	void (*DL_AddRectFilled)(PluginDrawList dl, float min_x, float min_y, float max_x, float max_y, unsigned int col, float rounding, int flags);
+	void (*DL_AddRectFilledMultiColor)(PluginDrawList dl, float min_x, float min_y, float max_x, float max_y, unsigned int col_upr_left, unsigned int col_upr_right, unsigned int col_bot_right, unsigned int col_bot_left);
+	void (*DL_AddQuad)(PluginDrawList dl, float x1, float y1, float x2, float y2, float x3, float y3, float x4, float y4, unsigned int col, float thickness);
+	void (*DL_AddQuadFilled)(PluginDrawList dl, float x1, float y1, float x2, float y2, float x3, float y3, float x4, float y4, unsigned int col);
+	void (*DL_AddTriangle)(PluginDrawList dl, float x1, float y1, float x2, float y2, float x3, float y3, unsigned int col, float thickness);
+	void (*DL_AddTriangleFilled)(PluginDrawList dl, float x1, float y1, float x2, float y2, float x3, float y3, unsigned int col);
+	void (*DL_AddCircle)(PluginDrawList dl, float center_x, float center_y, float radius, unsigned int col, int num_segments, float thickness);
+	void (*DL_AddCircleFilled)(PluginDrawList dl, float center_x, float center_y, float radius, unsigned int col, int num_segments);
+	void (*DL_AddNgon)(PluginDrawList dl, float center_x, float center_y, float radius, unsigned int col, int num_segments, float thickness);
+	void (*DL_AddNgonFilled)(PluginDrawList dl, float center_x, float center_y, float radius, unsigned int col, int num_segments);
+	void (*DL_AddEllipse)(PluginDrawList dl, float center_x, float center_y, float radius_x, float radius_y, unsigned int col, float rot, int num_segments, float thickness);
+	void (*DL_AddEllipseFilled)(PluginDrawList dl, float center_x, float center_y, float radius_x, float radius_y, unsigned int col, float rot, int num_segments);
+
+	// Text drawn directly onto the draw list (bypasses layout/cursor).
+	void (*DL_AddText)(PluginDrawList dl, float x, float y, unsigned int col, const char* text);
+	void (*DL_AddTextSized)(PluginDrawList dl, float font_size, float x, float y, unsigned int col, const char* text);
+
+	// points_xy is a flat array of (x,y) pairs, length == point_count * 2.
+	void (*DL_AddPolyline)(PluginDrawList dl, const float* points_xy, int point_count, unsigned int col, int flags, float thickness);
+	void (*DL_AddConvexPolyFilled)(PluginDrawList dl, const float* points_xy, int point_count, unsigned int col);
+	void (*DL_AddBezierCubic)(PluginDrawList dl, float x1, float y1, float x2, float y2, float x3, float y3, float x4, float y4, unsigned int col, float thickness, int num_segments);
+	void (*DL_AddBezierQuadratic)(PluginDrawList dl, float x1, float y1, float x2, float y2, float x3, float y3, unsigned int col, float thickness, int num_segments);
+
+	// Images -- tex must be a handle obtained from IPluginImGuiTextures (hooks->ImGuiTextures).
+	void (*DL_AddImage)(PluginDrawList dl, PluginTextureHandle tex, float min_x, float min_y, float max_x, float max_y, float uv_min_x, float uv_min_y, float uv_max_x, float uv_max_y, unsigned int col);
+	void (*DL_AddImageQuad)(PluginDrawList dl, PluginTextureHandle tex, float x1, float y1, float x2, float y2, float x3, float y3, float x4, float y4, float u1, float v1, float u2, float v2, float u3, float v3, float u4, float v4, unsigned int col);
+	void (*DL_AddImageRounded)(PluginDrawList dl, PluginTextureHandle tex, float min_x, float min_y, float max_x, float max_y, float uv_min_x, float uv_min_y, float uv_max_x, float uv_max_y, unsigned int col, float rounding, int flags);
+
+	// Stateful path builder: accumulate points with PathLineTo/PathArcTo/etc,
+	// then emit a primitive with PathStroke or PathFillConvex. PathClear resets
+	// the accumulated point list without emitting anything.
+	void (*DL_PathClear)(PluginDrawList dl);
+	void (*DL_PathLineTo)(PluginDrawList dl, float x, float y);
+	void (*DL_PathArcTo)(PluginDrawList dl, float center_x, float center_y, float radius, float a_min, float a_max, int num_segments);
+	void (*DL_PathArcToFast)(PluginDrawList dl, float center_x, float center_y, float radius, int a_min_of_12, int a_max_of_12);
+	void (*DL_PathEllipticalArcTo)(PluginDrawList dl, float center_x, float center_y, float radius_x, float radius_y, float rot, float a_min, float a_max, int num_segments);
+	void (*DL_PathBezierCubicCurveTo)(PluginDrawList dl, float x2, float y2, float x3, float y3, float x4, float y4, int num_segments);
+	void (*DL_PathBezierQuadraticCurveTo)(PluginDrawList dl, float x2, float y2, float x3, float y3, int num_segments);
+	void (*DL_PathRect)(PluginDrawList dl, float min_x, float min_y, float max_x, float max_y, float rounding, int flags);
+	void (*DL_PathFillConvex)(PluginDrawList dl, unsigned int col);
+	void (*DL_PathStroke)(PluginDrawList dl, unsigned int col, int flags, float thickness);
+
+	// Draw-list-local clip rect stack (separate from the window-level clip
+	// stack managed by PushClipRect/PopClipRect above).
+	void (*DL_PushClipRect)(PluginDrawList dl, float min_x, float min_y, float max_x, float max_y, bool intersect_current);
+	void (*DL_PushClipRectFullScreen)(PluginDrawList dl);
+	void (*DL_PopClipRect)(PluginDrawList dl);
+	void (*DL_GetClipRectMin)(PluginDrawList dl, float* out_x, float* out_y);
+	void (*DL_GetClipRectMax)(PluginDrawList dl, float* out_x, float* out_y);
+
+	// -------------------------------------------------------------------------
+	// v52: Mouse wheel
+	// -------------------------------------------------------------------------
+	// Per-frame wheel delta in ImGui units (one notch = 1.0), read straight off
+	// ImGuiIO. ImGui consumes WM_MOUSEWHEEL itself, so this is the only way a
+	// plugin can see the wheel at all -- needed by anything that draws its own
+	// zoomable or scrollable surface with the draw-list API.
+	float (*GetMouseWheel)();
+	float (*GetMouseWheelH)();
 };
 
 typedef void (*PluginImGuiRenderCallback)(IModLoaderImGui* imgui);
@@ -864,8 +1109,10 @@ struct IPluginUIEvents
 {
 	PanelHandle  (*RegisterPanel)(const PluginPanelDesc* desc);
 	void         (*UnregisterPanel)(PanelHandle handle);
-	void         (*RegisterOnConfigChanged)(PluginConfigChangedCallback callback);
-	void         (*UnregisterOnConfigChanged)(PluginConfigChangedCallback callback);
+	// v49: self scopes the callback to this plugin's own config file -- pass
+	// the same IPluginSelf* received in PluginInit.
+	void         (*RegisterOnConfigChanged)(const IPluginSelf* self, PluginConfigChangedCallback callback);
+	void         (*UnregisterOnConfigChanged)(const IPluginSelf* self, PluginConfigChangedCallback callback);
 	void         (*SetPanelOpen)(PanelHandle handle);
 	void       (*SetPanelClose)(PanelHandle handle);
 	WidgetHandle (*RegisterWidget)(const PluginWidgetDesc* desc);      // v16
@@ -886,6 +1133,193 @@ struct IPluginUIEvents
 	// until the modloader restarts.
 	void* (*AcquireInputCapture)();
 	void  (*ReleaseInputCapture)(void* token);
+
+	// v51: Cooperative alternative to AcquireInputCapture. While a passthrough
+	// token is held, ImGui receives every message and draws/owns the cursor
+	// just as it does under an exclusive capture, but the game is only cut out
+	// of the input classes ImGui actually wants that frame: mouse while the
+	// cursor is over an ImGui window or dragging a widget, keyboard while a
+	// text field has focus. Everything else -- including the WM_INPUT raw
+	// mouse deltas UE5 uses for camera look -- still reaches the game, so the
+	// player can keep moving with your UI on screen.
+	//
+	// Use this for always-on widget UIs the player is meant to interact with
+	// the world underneath; use AcquireInputCapture for modal windows that
+	// should freeze the game.
+	//
+	// Exclusive capture wins: while any modloader window, plugin panel, or
+	// AcquireInputCapture token is active, passthrough tokens have no effect.
+	// Refcounted across all plugins; always release every acquired token,
+	// including during PluginShutdown.
+	void* (*AcquireInputPassthrough)();
+	void  (*ReleaseInputPassthrough)(void* token);
+};
+
+// ---------------------------------------------------------------------------
+// In-world debug drawing (v50, client only) -- hooks->HUD->DebugDraw
+//
+// Reimplements the UKismetSystemLibrary::DrawDebug* set, which is entirely
+// dead on shipping builds: ENABLE_DRAW_DEBUG is 0, so all sixteen bodies
+// compiled away to nothing and only the exec thunks remain (they parse their
+// parameters off the stack and return). The DrawDebugType pin on the trace
+// nodes is inert for the same reason. What survives is the renderer --
+// UWorld::LineBatchers and ULineBatchComponent::DrawLines -- so these
+// functions build the same geometry and feed it to the engine's own batchers.
+//
+// THREADING: safe to call from any thread. The line batchers are UObjects and
+// can only be touched on the game thread, but you do not have to arrange that
+// -- the modloader converts your arguments to owned values up front and then
+// either draws inline (if you were already on the game thread) or defers by a
+// single frame. This matters because ImGui panel and widget callbacks run on
+// the render thread, and those are the most natural place to want to draw.
+//
+// Nothing you pass is retained past the call, including the float-history
+// sample array (it is deep-copied). The exception is actor pointers --
+// DrawCamera's camera actor and DrawString's base actor -- which must stay
+// valid for the frame.
+//
+// LIFETIME: style->duration <= 0 draws for a single frame. A positive duration
+// (or style->bPersistent) routes into the persistent batcher, which survives
+// the per-frame flush -- FlushPersistentLines clears it. This mirrors the
+// engine's own GetDebugLineBatcher/GetDebugLineLifeTime rules.
+//
+// The geometry structs below are compiled into the plugin by value, so they
+// are frozen: never reorder or extend them -- add a new struct instead.
+// ---------------------------------------------------------------------------
+
+struct PluginDebugVector  { double x, y, z; };
+struct PluginDebugRotator { double pitch, yaw, roll; };   // degrees, UE convention
+struct PluginDebugColor   { float  r, g, b, a; };         // linear, 0..1
+struct PluginDebugPlane   { double x, y, z, w; };         // normal xyz + distance w
+
+struct PluginDebugTransform
+{
+	PluginDebugVector  location;
+	PluginDebugRotator rotation;
+	PluginDebugVector  scale;
+};
+
+// Plugin-owned sample array. Read during the call and never retained.
+struct PluginDebugFloatHistory
+{
+	const float* samples;
+	int32_t      count;
+	float        minValue;
+	float        maxValue;
+	bool         bAutoAdjustMinMax;   // recompute min/max from the samples
+};
+
+struct PluginDebugDrawStyle
+{
+	PluginDebugColor color;
+	float            duration;      // <= 0: this frame only.  > 0: seconds.
+	float            thickness;     // 0 = thin (single pixel) lines
+	bool             bPersistent;   // never expires until FlushPersistentLines
+	bool             bForeground;   // draw on top of world geometry
+};
+
+struct IPluginDebugDraw
+{
+	// False if ULineBatchComponent::DrawLines could not be resolved on this
+	// build -- every Draw* below is then a silent no-op. Check once at init.
+	bool (*IsAvailable)();
+
+	void (*DrawLine)(const PluginDebugVector* start, const PluginDebugVector* end,
+	                 const PluginDebugDrawStyle* style);
+
+	// The engine draws this through BatchedPoints, which has no reachable entry
+	// point here, so it is a three-axis cross of half-length `size` instead.
+	void (*DrawPoint)(const PluginDebugVector* position, float size,
+	                  const PluginDebugDrawStyle* style);
+
+	// Circle lies in the plane spanned by yAxis/zAxis (pass {0,1,0} and {0,0,1}
+	// for a world XY circle). Both are normalised internally.
+	void (*DrawCircle)(const PluginDebugVector* center, float radius, int numSegments,
+	                   const PluginDebugVector* yAxis, const PluginDebugVector* zAxis,
+	                   bool bDrawAxis, const PluginDebugDrawStyle* style);
+
+	void (*DrawSphere)(const PluginDebugVector* center, float radius, int segments,
+	                   const PluginDebugDrawStyle* style);
+
+	void (*DrawBox)(const PluginDebugVector* center, const PluginDebugVector* extent,
+	                const PluginDebugRotator* rotation, const PluginDebugDrawStyle* style);
+
+	void (*DrawCapsule)(const PluginDebugVector* center, float halfHeight, float radius,
+	                    const PluginDebugRotator* rotation, const PluginDebugDrawStyle* style);
+
+	void (*DrawCylinder)(const PluginDebugVector* start, const PluginDebugVector* end,
+	                     float radius, int segments, const PluginDebugDrawStyle* style);
+
+	void (*DrawConeInDegrees)(const PluginDebugVector* origin, const PluginDebugVector* direction,
+	                          float length, float angleWidthDeg, float angleHeightDeg,
+	                          int numSides, const PluginDebugDrawStyle* style);
+
+	void (*DrawArrow)(const PluginDebugVector* start, const PluginDebugVector* end,
+	                  float arrowSize, const PluginDebugDrawStyle* style);
+
+	// Axes are drawn red/green/blue like the engine's version, so style->color
+	// is ignored here. Everything else in the style still applies.
+	void (*DrawCoordinateSystem)(const PluginDebugVector* location, const PluginDebugRotator* rotation,
+	                             float scale, const PluginDebugDrawStyle* style);
+
+	// The engine fills this quad via BatchedMeshes, which is unreachable, so it
+	// is drawn as four border edges plus both diagonals, with the same yellow
+	// normal arrow.
+	void (*DrawPlane)(const PluginDebugPlane* plane, const PluginDebugVector* location,
+	                  float size, const PluginDebugDrawStyle* style);
+
+	void (*DrawFrustum)(const PluginDebugTransform* frustumTransform,
+	                    const PluginDebugDrawStyle* style);
+
+	// cameraActor must be an SDK::ACameraActor*; location/rotation come off the
+	// actor and the FOV off its UCameraComponent. No-op if either is null.
+	void (*DrawCamera)(void* cameraActor, float scale, const PluginDebugDrawStyle* style);
+
+	// Same geometry with no actor lookup, for cameras you already have a
+	// transform for.
+	void (*DrawCameraAt)(const PluginDebugVector* location, const PluginDebugRotator* rotation,
+	                     float fovDegrees, float scale, const PluginDebugDrawStyle* style);
+
+	// Canvas-space text pinned to a world location, routed through
+	// AHUD::AddDebugText (which AHUD::DrawDebugTextList still renders). text is
+	// UTF-8. testBaseActor may be null, in which case the text is placed at an
+	// absolute world location. Independent of the line batchers:
+	// FlushPersistentLines does not clear these, ClearAllStrings does.
+	//
+	// WARNING: duration does NOT follow the same rule as the style duration
+	// used everywhere else here. The HUD only treats exactly -1.0f as "never
+	// expire"; every other value counts down, including 0, which vanishes on
+	// the next HUD render. (Line durations are the opposite -- anything <= 0
+	// lives forever in a persistent batcher.)
+	//
+	// fontScale multiplies the text size directly -- the engine assigns it
+	// straight to the canvas text item's scale, with no distance falloff and no
+	// clamping, so 2.0f is exactly twice the size at any range. 1.0f is the
+	// default (the engine's small font at native size); anything <= 0 is
+	// treated as 1.0f so a zeroed struct can't produce invisible text.
+	void (*DrawString)(const PluginDebugVector* location, const char* text, void* testBaseActor,
+	                   const PluginDebugColor* color, float duration, float fontScale);
+
+	// drawSize uses x as the graph width and y as its height (z is unused).
+	// The engine fills the graph body with a mesh; these draw the bounding
+	// frame plus the sample polyline.
+	void (*DrawFloatHistoryTransform)(const PluginDebugFloatHistory* history,
+	                                  const PluginDebugTransform* drawTransform,
+	                                  const PluginDebugVector* drawSize,
+	                                  const PluginDebugDrawStyle* style);
+
+	void (*DrawFloatHistoryLocation)(const PluginDebugFloatHistory* history,
+	                                 const PluginDebugVector* drawLocation,
+	                                 const PluginDebugVector* drawSize,
+	                                 const PluginDebugDrawStyle* style);
+
+	// Clears both persistent batchers, like the engine's
+	// FLUSHPERSISTENTDEBUGLINES console command. Affects every plugin's
+	// persistent lines, not just yours.
+	void (*FlushPersistentLines)();
+
+	// Clears every world-anchored debug string on the local HUD.
+	void (*ClearAllStrings)();
 };
 
 struct IPluginHUDEvents
@@ -893,6 +1327,11 @@ struct IPluginHUDEvents
 	void      (*RegisterOnPostRender)(PluginHUDPostRenderCallback callback);
 	void  (*UnregisterOnPostRender)(PluginHUDPostRenderCallback callback);
 	uintptr_t (*GetGatherPlayersDataAddress)();
+
+	// v50 -- appended at the end, do not relocate. Never null on client builds
+	// (the whole HUD interface is null on server/generic); check
+	// DebugDraw->IsAvailable() for whether the underlying native resolved.
+	IPluginDebugDraw* DebugDraw;
 };
 
 // ---------------------------------------------------------------------------
@@ -1144,6 +1583,194 @@ struct IPluginSplash
 // ---------------------------------------------------------------------------
 // Top-level hooks interface (v14+)
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// v47 -- GObjects walking, object lookup by class/name, raw UFunction
+// invocation via ProcessEvent. On-demand only; see changelog comment above.
+// ---------------------------------------------------------------------------
+// className/objectName are fixed buffers, not pointers -- the *Into functions
+// fill outArray and return, so nothing can point at a temporary that has
+// already been destroyed by the time the caller reads the array. Truncated
+// (rather than failing) if a name is longer than the buffer.
+struct PluginObjectInfo
+{
+	void*   object;
+	char    className[128];
+	char    objectName[256];
+	uint32_t nameNumber;
+	uint32_t objectFlags;
+	int32_t  objectIndex;
+};
+
+// Filters layered on top of the existing BeginDestroyed/FinishDestroyed skip,
+// so plugins never need to know raw EObjectFlags bit values themselves.
+enum PluginObjectLookupMode : int32_t
+{
+	PluginObjectLookup_Both         = 0, // CDOs, archetypes, and live instances
+	PluginObjectLookup_InstanceOnly = 1, // skips ClassDefaultObject + ArchetypeObject
+	PluginObjectLookup_CDOOnly      = 2, // only ClassDefaultObject
+};
+
+struct IPluginObjectWalker
+{
+	// True once GObjects is populated (i.e. after EngineInit). Plugins must
+	// gate all other calls on this returning true.
+	bool (*IsReady)();
+
+	// Fills outArray (capacity entries max) with every UObject in GObjects
+	// matching mode, in GObjects order. Returns the TOTAL number of matches
+	// found, which may exceed capacity -- compare the return value against
+	// capacity to detect truncation and re-call with a bigger buffer if
+	// needed. outArray is plugin-owned; nothing is allocated by the modloader.
+	// EXPENSIVE: tens of thousands of entries. Caller is responsible for
+	// caching results -- do not call this every tick.
+	int (*WalkAllObjectsInto)(PluginObjectLookupMode mode, PluginObjectInfo* outArray, int capacity);
+
+	// Convenience: only matches objects whose class short-name matches exactly.
+	int (*FindObjectsByClassNameInto)(const char* className, PluginObjectLookupMode mode,
+		PluginObjectInfo* outArray, int capacity);
+
+	// Exact FName string match (ignores instance number); returns first hit or null.
+	void* (*FindFirstObjectByName)(const char* objectName);
+
+	// Exact FName string match; matches all instances (handles Name_N collisions).
+	int (*FindObjectsByNameInto)(const char* objectName, PluginObjectLookupMode mode,
+		PluginObjectInfo* outArray, int capacity);
+
+	// Invoke className::funcName on object via ProcessEvent. paramsBuffer must
+	// match the UFunction's native Params struct layout exactly -- no
+	// marshaling is performed. Returns false if object/class/function could
+	// not be resolved.
+	bool (*InvokeUFunctionByName)(void* object, const char* className, const char* funcName, void* paramsBuffer);
+
+	// Resolve once, call many times (avoids repeated name lookups in a loop
+	// that still must remain caller-triggered, not engine-tick-triggered).
+	void* (*ResolveUFunction)(const char* className, const char* funcName);
+	bool (*InvokeResolvedUFunction)(void* object, void* resolvedFunction, void* paramsBuffer);
+};
+
+// v47 -- Hooks::DelegateHook (engine-side: hooks/game/delegate_hook/).
+// Lets a plugin react to an existing UE5 multicast delegate (e.g.
+// SDK::UCrSaveSubsystem::OnAfterSave) without the maintainer hand-writing a
+// dedicated AOB-scanned hooks/game/<event>/ module for it.
+//
+// Mechanism (see delegate_hook.h/.cpp for full detail): a brand-new,
+// privately-named UFunction is cloned from an existing native UFunction
+// (used purely as a safe field-layout template -- its actual behavior is
+// irrelevant and never invoked, so hostClassName/hostFuncName are OPTIONAL;
+// leave them null to use the modloader's own built-in template instead of
+// hunting one down yourself) and spliced into the target delegate's
+// InvocationList. UClass::FindFunctionByName is hooked to resolve this
+// synthetic name privately; every other name -- i.e. everything else in the
+// game -- takes the real, unmodified path. No real UClass's FuncMap/
+// AllFunctionsCache is ever touched, so nothing else that resolves the same
+// real function name is affected.
+//
+// Deliberately parameterless: PluginDelegateCallback receives only
+// userContext, not the delegate's broadcast arguments. Multiple concurrent
+// hooks are supported, including several hooks on the very same delegatePtr
+// -- each Hook() call gets its own independent handle.
+struct IPluginDelegateHook
+{
+	// delegatePtr must point at a live TMulticastInlineDelegate<...> member
+	// (any arity -- InvocationList is always TArray<FScriptDelegate>).
+	// hostObject is the object the delegate will report as broadcasting on
+	// (becomes the FWeakObjectPtr in the spliced FScriptDelegate) -- usually
+	// the same object delegatePtr lives on.
+	//
+	// hostClassName/hostFuncName are OPTIONAL -- pass nullptr for both (the
+	// common case) to use the modloader's built-in template UFunction. Only
+	// the template's native FunctionFlags/layout are copied; its actual
+	// behavior is irrelevant and never invoked, so there's no reason to
+	// supply your own unless you have a specific reason not to depend on the
+	// modloader's built-in default.
+	//
+	// Returns 0 on failure (template not resolved, FindFunctionByName hook
+	// unavailable, or InvocationList could not be grown); otherwise a handle
+	// for Unhook/IsHooked.
+	DelegateHookHandle (*Hook)(void* delegatePtr, void* hostObject,
+		const char* hostClassName, const char* hostFuncName,
+		PluginDelegateCallback callback, void* userContext);
+
+	// Removes the spliced FScriptDelegate entry and frees the synthetic
+	// clone. False if handle is not (or no longer) active.
+	bool (*Unhook)(DelegateHookHandle handle);
+
+	// True if handle currently has an active hook installed via this module.
+	bool (*IsHooked)(DelegateHookHandle handle);
+};
+
+// v47 -- Hooks::ObjectProperties. Lets a plugin read/write a UPROPERTY by
+// name instead of casting to a raw SDK struct and reading a compiled-in
+// offset, so a game update that reshuffles struct layout (a Dumper-7
+// re-export) does not require recompiling the plugin -- only the property
+// *name* has to stay the same. PluginPropertyHandle is an opaque FProperty*.
+//
+// Typed accessors validate the property's reflection type before touching
+// memory and return false on a mismatch. GetPropertyRawPtr is the escape
+// hatch for kinds with no typed accessor here (Array/Map/Set/Delegate/...).
+//
+// Does NOT cover plain native C++ members with no UPROPERTY/FProperty entry
+// -- those have no reflection metadata to look up by name and still need a
+// hand-derived raw offset.
+typedef void* PluginPropertyHandle;
+
+enum class PluginPropertyKind : int32_t
+{
+	Unknown = 0,
+	Bool,
+	Int,    // any signed/unsigned integer width 1-8 bytes
+	Float,  // FloatProperty or DoubleProperty
+	Name,
+	Str,
+	Object, // raw-pointer-backed UObject* only (not Weak/Soft/LazyObjectProperty)
+	Struct,
+	Array,
+	Enum,
+	Unsupported, // recognized property type with no typed accessor here
+};
+
+struct IPluginObjectProperties
+{
+	bool (*IsReady)();
+
+	// Resolve a property by class name + property name (walks the class's
+	// ChildProperties + SuperStruct chain). Returns null if not found.
+	PluginPropertyHandle (*FindPropertyByName)(const char* className, const char* propertyName);
+
+	// Convenience: resolves object's class then calls FindPropertyByName.
+	PluginPropertyHandle (*FindPropertyOnObject)(void* object, const char* propertyName);
+
+	PluginPropertyKind (*GetPropertyKind)(PluginPropertyHandle property);
+	size_t  (*GetPropertySize)(PluginPropertyHandle property);     // ElementSize * ArrayDim
+	int32_t (*GetPropertyArrayDim)(PluginPropertyHandle property);
+
+	// Raw escape hatch: container + property's offset, no type checking.
+	void* (*GetPropertyRawPtr)(void* container, PluginPropertyHandle property);
+
+	// Typed getters/setters. Each validates the property's reflection type
+	// before touching memory; returns false on type mismatch or null args.
+	bool (*GetBoolProperty)(void* container, PluginPropertyHandle property, bool* outValue);
+	bool (*SetBoolProperty)(void* container, PluginPropertyHandle property, bool value);
+
+	bool (*GetIntProperty)(void* container, PluginPropertyHandle property, int64_t* outValue);
+	bool (*SetIntProperty)(void* container, PluginPropertyHandle property, int64_t value);
+
+	bool (*GetFloatProperty)(void* container, PluginPropertyHandle property, double* outValue);
+	bool (*SetFloatProperty)(void* container, PluginPropertyHandle property, double value);
+
+	bool (*GetObjectProperty)(void* container, PluginPropertyHandle property, void** outValue);
+	bool (*SetObjectProperty)(void* container, PluginPropertyHandle property, void* value);
+
+	// Read-only -- see file header comment above on why String/Name have no setter.
+	bool (*GetStringProperty)(void* container, PluginPropertyHandle property, char* outBuffer, int bufferSize);
+	bool (*GetNameProperty)(void* container, PluginPropertyHandle property, char* outBuffer, int bufferSize);
+
+	// For struct-typed properties: the nested type's class name, so callers
+	// can recurse FindPropertyByName on inner fields. Empty string if the
+	// property is not a struct property.
+	bool (*GetPropertyStructTypeName)(PluginPropertyHandle property, char* outBuffer, int bufferSize);
+};
+
 struct IPluginHooks
 {
 	IPluginSpawnerHooks*   Spawner;        // v14
@@ -1164,6 +1791,9 @@ struct IPluginHooks
 	IPluginImGuiTextures*  ImGuiTextures;    // v37 — client only; null on server/generic
 	IPluginSplash*         Splash;           // v40 — client only; null on server/generic
 	IPluginCraftingEvents* Crafting;       // v44 -- appended at end to preserve layout for v42/v43 plugins
+	IPluginObjectWalker*   ObjectWalker;   // v47 -- appended at end, do not relocate
+	IPluginDelegateHook*   Delegate;       // v47 -- appended at end, do not relocate
+	IPluginObjectProperties* ObjectProperties; // v47 -- appended at end, do not relocate
 };
 
 // ---------------------------------------------------------------------------
