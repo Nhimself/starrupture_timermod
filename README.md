@@ -41,7 +41,7 @@ steamapps/common/StarRupture/StarRupture/Binaries/Win64/
 2. Place it in:
 
 ```
-steamapps/common/StarRupture/StarRupture/Binaries/Win64/Plugins/
+steamapps/common/StarRupture/StarRupture/Binaries/Win64/ModLoader/Plugins/
 ```
 
 3. Launch the game. On first run the mod loader generates a config file.
@@ -53,7 +53,7 @@ steamapps/common/StarRupture/StarRupture/Binaries/Win64/Plugins/
 Config file location:
 
 ```
-Plugins/config/RuptureTimer.ini
+StarRupture/Binaries/Win64/ModLoader/Plugins/config/RuptureTimer.ini
 ```
 
 ### [General]
@@ -71,7 +71,9 @@ Enabled=1
 ; Write timer state to a JSON file (set to 0 to disable)
 WriteJsonFile=1
 
-; Path to the output file, relative to the game directory
+; Path to the output file, relative to the ModLoader directory
+; (absolute paths are used as-is). The default resolves to:
+;   StarRupture/Binaries/Win64/ModLoader/Plugins/data/rupture_timer.json
 JsonFilePath=Plugins/data/rupture_timer.json
 
 ; How often the file is updated (seconds, minimum 0.1)

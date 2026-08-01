@@ -1,6 +1,7 @@
 #pragma once
 
 #include "plugin_interface.h"
+#include <cstdio>
 
 namespace RuptureTimerConfig
 {
@@ -28,7 +29,7 @@ namespace RuptureTimerConfig
 			"JsonFilePath",
 			ConfigValueType::String,
 			"Plugins/data/rupture_timer.json",
-			"Path to the JSON output file (relative to game directory)",
+			"Path to the JSON output file (relative to the ModLoader directory; absolute paths are used as-is)",
 			0.0f, 0.0f
 		},
 		{
@@ -60,7 +61,7 @@ namespace RuptureTimerConfig
 			"DiagnosticLogPath",
 			ConfigValueType::String,
 			"Plugins/data/timer_diagnostic.log",
-			"Path to the diagnostic log file (relative to game directory)",
+			"Path to the diagnostic log file (relative to the ModLoader directory; absolute paths are used as-is)",
 			0.0f, 0.0f
 		},
 		// --- HUD (in-game overlay) ---
@@ -135,9 +136,11 @@ namespace RuptureTimerConfig
 		static const char* GetJsonFilePath()
 		{
 			static char buffer[512];
+			static char resolved[512];
+			const char* configured = "Plugins/data/rupture_timer.json";
 			if (s_self && s_self->config && s_self->config->ReadString(s_self, "Export", "JsonFilePath", buffer, sizeof(buffer), "Plugins/data/rupture_timer.json"))
-				return buffer;
-			return "Plugins/data/rupture_timer.json";
+				configured = buffer;
+			return ResolveOutputPath(configured, resolved, sizeof(resolved));
 		}
 
 		static float GetUpdateIntervalSeconds()
@@ -158,9 +161,11 @@ namespace RuptureTimerConfig
 		static const char* GetDiagnosticLogPath()
 		{
 			static char buffer[512];
+			static char resolved[512];
+			const char* configured = "Plugins/data/timer_diagnostic.log";
 			if (s_self && s_self->config && s_self->config->ReadString(s_self, "Export", "DiagnosticLogPath", buffer, sizeof(buffer), "Plugins/data/timer_diagnostic.log"))
-				return buffer;
-			return "Plugins/data/timer_diagnostic.log";
+				configured = buffer;
+			return ResolveOutputPath(configured, resolved, sizeof(resolved));
 		}
 
 		// --- HUD ---
@@ -191,6 +196,48 @@ namespace RuptureTimerConfig
 		}
 
 	private:
+		// Resolve a possibly-relative output path against the parent of the
+		// directory this DLL lives in. The modloader loads plugins from
+		// <exe_dir>\ModLoader\Plugins\, so the anchor is the ModLoader folder
+		// and the "Plugins/data/..." defaults land in ModLoader\Plugins\data\.
+		// Resolving against the CWD (as before) broke when the modloader moved
+		// plugins out of Binaries\Win64\Plugins\ — the relative defaults then
+		// pointed at a folder that no longer exists.
+		static const char* ResolveOutputPath(const char* configured, char* out, size_t cap)
+		{
+			// Absolute paths (drive letter, rooted, or UNC) are used as-is.
+			if (configured[0] == '\\' || configured[0] == '/' ||
+				(configured[0] != '\0' && configured[1] == ':'))
+				return configured;
+
+			HMODULE hm = nullptr;
+			if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+			                        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			                        reinterpret_cast<LPCSTR>(&s_self), &hm))
+				return configured;
+
+			char dllPath[MAX_PATH];
+			DWORD n = GetModuleFileNameA(hm, dllPath, MAX_PATH);
+			if (n == 0 || n >= MAX_PATH)
+				return configured;
+
+			// Strip the DLL filename, then the Plugins directory itself, to
+			// land on the ModLoader folder the config paths are relative to.
+			for (int strip = 0; strip < 2; strip++)
+			{
+				char* lastSep = nullptr;
+				for (char* p = dllPath; *p; p++)
+					if (*p == '\\' || *p == '/') lastSep = p;
+				if (!lastSep) return configured;
+				*lastSep = '\0';
+			}
+
+			int written = snprintf(out, cap, "%s\\%s", dllPath, configured);
+			if (written <= 0 || static_cast<size_t>(written) >= cap)
+				return configured;
+			return out;
+		}
+
 		static IPluginSelf* s_self;
 	};
 }
